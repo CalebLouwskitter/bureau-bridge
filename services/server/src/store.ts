@@ -96,6 +96,7 @@ export class SqlStore implements Store {
         .input("source", sql.Char(12), input.sourceAccount)
         .input("target", sql.Char(12), input.targetAccount)
         .input("amount", sql.BigInt, input.amountMinor).query(`
+          SET XACT_ABORT ON;
           INSERT dbo.Allocations (Id,ClientId,IdempotencyKey,Fingerprint,SourceAccount,TargetAccount,AmountMinor,Currency,Status)
           VALUES (@id,@client,@key,@hash,@source,@target,@amount,'ZAR','QUEUED');
           INSERT dbo.Outbox (AllocationId) VALUES (@id);
