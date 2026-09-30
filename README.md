@@ -121,7 +121,7 @@ The PHP portal exports request and batch-control CSVs. The modern operations vie
 
 ## Validation status
 
-These results were recorded during the second review. The CI badge links to the repository's current workflow status.
+These results combine the local second review with a [successful full GitHub CI run](https://github.com/CalebLouwskitter/bureau-bridge/actions/runs/36699107346). The CI badge links to the repository's current workflow status.
 
 | Validation | Evidence |
 | --- | --- |
@@ -132,7 +132,9 @@ These results were recorded during the second review. The CI badge links to the 
 | Real HTTP integration | TypeScript legacy client, authenticated reports, operator session/form token, and credential boundaries passed |
 | Expo | Android/iOS Hermes and web bundles exported; native HTTP/HTTPS config introspected |
 | Compose | Configuration validation passed |
-| Remaining runtime gate | SQL Server migrations/locks/transactions, complete Docker startup/smoke, and native builds/device behavior were not run in the review environment |
+| Real SQL Server | Migrations, concurrent idempotent creation, exclusive/stale leases, final-status protection, account projection ordering, and persisted reconciliation passed in CI |
+| Docker / complete stack | Container build/startup, real legacy integration, and full-stack posting/recovery/reconciliation smoke passed in CI |
+| Remaining device gate | Native Android/iOS binaries, device networking, UI interactions, and native sharing still need build and device checks |
 
 [The full evidence](docs/validation.md) distinguishes compilation and isolated tests from actual runtime checks. [The requirements review](docs/second-review.md) records the fixes and remaining scope. JavaScript bundles exported successfully; signed device binaries still need build and device validation.
 
@@ -165,6 +167,6 @@ The [CI workflow](.github/workflows/validate.yml) includes real legacy integrati
 
 ## Next slices
 
-Finish the SQL Server and device acceptance gates, then extend employer/operator catalogs, bulk payroll imports, identity integration, retention and backup/restore, and an external payout simulation. The current fixture models one employer and internal allocations with fictional data.
+Finish native build and device acceptance, then extend employer/operator catalogs, bulk payroll imports, identity integration, retention and backup/restore, and an external payout simulation. The current fixture models one employer and internal allocations with fictional data.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the project boundaries and verification routes.

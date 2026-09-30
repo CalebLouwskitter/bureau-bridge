@@ -2,7 +2,7 @@
 
 **Reviewed:** 30 September 2026 · **Corrected source:** v0.2.0
 
-**Finding:** v0.1 did not meet every proposed idea. v0.2 fills the missing balance/reconciliation/reporting views and corrects recovery, authentication, and mobile setup issues. The confirmed foundation is represented in the code, but complete acceptance is still pending Microsoft SQL Server/Docker execution and native mobile builds/device checks.
+**Finding:** v0.1 did not meet every proposed idea. v0.2 fills the missing balance/reconciliation/reporting views and corrects recovery, authentication, and mobile setup issues. The confirmed foundation is represented in the code. Subsequent [GitHub CI execution](https://github.com/CalebLouwskitter/bureau-bridge/actions/runs/36699107346) verified Microsoft SQL Server and the complete Docker smoke scenario; native mobile builds/device checks remain pending.
 
 ## Requirement coverage
 
@@ -11,17 +11,17 @@
 | Payroll bureau acquired by fintech; insurer client | One fictional South African insurer payroll fixture; documented business situation                                                              | Met                                                                                      |
 | PHP portal with relational intake data             | Real PHP forms/JSON, MariaDB requests/manifests/membership/inquiries; integration and HTTP checks pass                                          | Met in local runtime                                                                     |
 | COBOL indexed authoritative core                   | Executable GnuCOBOL account/journal files, internal allocation rules, active/suspended state, R50,000 per-transfer limit                        | Met in local runtime                                                                     |
-| Legacy-to-modern integration using TypeScript      | Fastify API, worker, shared typed contracts, authenticated PHP boundary and file protocol; TypeScript and real legacy client checks pass        | Met; modern persistence gate remains                                                     |
-| Microsoft SQL Server                               | Schema, runtime login, transactional outbox, leases, projections, saved reconciliation; migration and driver configured                         | Implemented; SQL runtime unverified                                                      |
+| Legacy-to-modern integration using TypeScript      | Fastify API, worker, shared typed contracts, authenticated PHP boundary and file protocol; TypeScript and real legacy client checks pass        | Met; full-stack CI passed                                                               |
+| Microsoft SQL Server                               | Schema, runtime login, transactional outbox, leases, projections, saved reconciliation; migration and driver configured                         | Real SQL integration passed in CI                                                       |
 | Several daily batches, end-of-day, operator run    | 08:00/12:00/16:00/23:00 Johannesburg schedule; manual path uses the same exporter/core protocol                                                 | Configured; manual runs verified, clock-triggered execution unobserved                   |
 | Internal allocations and honest status wording     | Prefunded client → employee payable; “Posted internally” remains distinct from an external payout                                               | Met                                                                                      |
-| Replay protection and lost-result recovery         | Stable references, conflicting-payload rejection, processed journal, atomic generation publication, core inquiry and verified resumption        | Core/PHP/worker checks pass; SQL-specific fences unverified                              |
-| Balance/status/history read views                  | Timestamped core snapshots, role-filtered account API, modern register and history screen; source sequence rejects stale projections            | Snapshot/role/compile checks pass; SQL storage/device views unverified                   |
-| Reconciliation screen and exported reports         | Scheduled/on-demand comparison; immutable batch membership; PHP batch/request CSVs; ops reconciliation view/CSV; journal-derived balance checks | Comparison and real PHP HTTP reports verified; SQL persistence/native sharing unverified |
+| Replay protection and lost-result recovery         | Stable references, conflicting-payload rejection, processed journal, atomic generation publication, core inquiry and verified resumption        | Core/PHP/worker checks and real SQL/full-stack CI passed                                 |
+| Balance/status/history read views                  | Timestamped core snapshots, role-filtered account API, modern register and history screen; source sequence rejects stale projections            | Snapshot/role/compile and SQL storage checks pass; device views pending                  |
+| Reconciliation screen and exported reports         | Scheduled/on-demand comparison; immutable batch membership; PHP batch/request CSVs; ops reconciliation view/CSV; journal-derived balance checks | Comparison, SQL persistence and HTTP/CSV reports verified; native sharing pending        |
 | Android/iOS Expo setup                             | Expo Go and dev-client scripts, EAS profiles, local HTTP config, production HTTPS guard                                                         | Android/iOS/web bundles and native config pass; native binaries/devices pending          |
 | Mobile retry resilience                            | Immutable request persisted before POST, safe cache parsing, synchronous action guard, session-generation guard for stale responses             | Cache contract tests and platform compilation pass; device interaction pending           |
 | Roles and credential boundaries                    | Payroll/employee/ops routes; employee account ownership; separate bridge and operations secrets; operator Basic auth/form token                 | Isolated API and real PHP HTTP checks pass                                               |
-| Infrastructure and repeatable verification         | Seven-service Compose, generated local credentials, migration entrypoints, expanded SQL/smoke checks and CI workflow                            | Files supplied; full container/CI execution pending                                      |
+| Infrastructure and repeatable verification         | Seven-service Compose, generated local credentials, migration entrypoints, expanded SQL/smoke checks and CI workflow                            | Docker/SQL/full-stack CI passed; scheduled clock behavior unobserved                      |
 | PHP refresher and CV learning story                | README explains PHP intake/web role, COBOL ledger authority, TypeScript bridge, and separate databases                                          | Met                                                                                      |
 
 ## Defects and omissions corrected
@@ -33,6 +33,7 @@
 5. **Demo auth accepted inherited object names.** User lookup now requires an own property; `toString`, `constructor`, and `__proto__` do not receive sessions.
 6. **Mobile setup/retry handling needed safeguards.** Expo Go is selected explicitly; native lab builds allow local HTTP while production requires HTTPS. Damaged saved requests no longer block sign-in. Actions use an immediate lock, and responses from an old session cannot refill the next session's register.
 7. **CI and docs overstated coverage.** PHP lint now fails the job on an error; real legacy integration/HTTP checks run before SQL/smoke checks. Docs distinguish actual COBOL fields from surrounding manifests, static demo catalogs from database tables, and implemented features from unrun runtime gates.
+8. **Real SQL concurrency exposed a hidden duplicate-key error.** During GitHub validation, later inserts continued after a duplicate allocation was rejected and produced foreign-key errors. The create batch now aborts on the first SQL runtime error; the same concurrent replay/conflict test passed in the successful CI run.
 
 ## Evidence from this check
 
@@ -45,8 +46,8 @@
 
 ## Remaining work and scope limits
 
-Microsoft SQL Server syntax/driver/transactions, Docker image startup, and the expanded complete-stack smoke script have not been executed here because their runtime is unavailable. The supplied checks are the next acceptance gate. Native signing/builds, phone networking, UI interactions, and export/share still need device checks. The GitHub workflow has not been run remotely.
+Microsoft SQL Server migration/driver/transactions, Docker image startup, and the complete-stack smoke script subsequently passed in GitHub CI. Native signing/builds, phone networking, UI interactions, and export/share still need device checks. Clock-triggered batch execution and an existing-volume Docker/SQL Server upgrade remain unobserved; the indexed-file core upgrade fixture passed.
 
 The lab uses one employer fixture and static demo users. General employer/operator catalog management, bulk payroll uploads, production identity/deployment, backup/restore and retention automation, distributed core writers, and external bank payouts remain future slices. The confirmed first workflow remains internal allocations. Reconciliation observations may overlap imports and do not automatically repost money. Old batch membership already overwritten in v0.1 cannot be reconstructed by this update; mismatched controls remain visible.
 
-The project is suitable for developing a CV demonstration of legacy modernization. Describe the checks above accurately and finish the SQL/native acceptance gates before presenting it as a fully verified system.
+The project is suitable for a CV demonstration of legacy modernization, with real SQL Server and complete-stack runtime evidence. Describe the verified scenarios accurately and retain the remaining device, scheduler, and upgrade boundaries.

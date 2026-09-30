@@ -1,6 +1,24 @@
 # Validation evidence — v0.2
 
-Second review performed on 30 September 2026. No external repository or deployment was created.
+The local second review was performed on 30 September 2026. The project was subsequently published to GitHub and validated there; no application deployment was created.
+
+## GitHub runtime verification
+
+[GitHub Actions run 36699107346](https://github.com/CalebLouwskitter/bureau-bridge/actions/runs/36699107346) passed on 30 September 2026 against [code commit 4c336af](https://github.com/CalebLouwskitter/bureau-bridge/commit/4c336af8be8bb20eee3d95d07699051a1601556e). It verified:
+
+- TypeScript checks, 14 API/worker/contracts/reconciliation tests, 7 real COBOL tests, and PHP syntax checks.
+- Docker image builds and startup of the API, legacy service, both databases, migration job, and worker.
+- Real PHP/MariaDB/COBOL integration and the authenticated TypeScript-to-PHP HTTP boundary.
+- SQL Server migrations, concurrent atomic create/replay/conflict, exclusive and stale leases, immutable final outcomes, stale account snapshot rejection, and persisted reconciliation.
+- Complete-stack smoke: normal posting, a lost result after core commit, inquiry recovery, suspended-account decline, private balances, reconciliation, and CSV reports.
+
+The first CI run exposed a duplicate-request bug: SQL Server continued later statements after the allocation insert failed, so foreign-key errors hid the duplicate-key error. The create batch now enables `XACT_ABORT`; the same real SQL concurrency test passed in the successful run.
+
+This closes the original Docker/SQL Server acceptance gate. Signed Android/iOS binaries and device behavior, clock-triggered batch execution, and an existing-volume Docker/SQL Server upgrade remain unverified. The COBOL indexed-file upgrade fixture passed.
+
+## Local second-review evidence
+
+The table below records the earlier local environment. The Docker/SQL Server checks that were unrun locally were later completed by the GitHub run above.
 
 | Check                                           | Result                                                                                                                                                                                 |
 | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -21,13 +39,13 @@ Second review performed on 30 September 2026. No external repository or deployme
 
 The local legacy runtime was PHP 8.3.6, GnuCOBOL 3.1.2, and MariaDB 10.11.14. Compose targets PHP 8.3 on Debian, the distro GnuCOBOL package, MariaDB 11.4, and SQL Server 2022 Developer. The legacy checks establish real behavior across PHP, SQL-backed intake, fixed-width files, and COBOL. Container-specific behavior still belongs to the Docker gate.
 
-The TypeScript tests use a fake Store boundary. They prove request/role/recovery/comparison logic in isolation; they do not prove Microsoft SQL Server syntax, locks, migrations, or transaction correctness. The supplied SQL integration test now covers atomic request/outbox creation, replay/conflict, exclusive/stale leases, final-status preservation, source-sequence ordering for account projections, and persisted reconciliation findings. Those assertions are not yet runtime evidence.
+The TypeScript unit tests use a fake Store boundary. They prove request/role/recovery/comparison logic in isolation. The separate SQL integration test covers atomic request/outbox creation, replay/conflict, exclusive/stale leases, final-status preservation, source-sequence ordering for account projections, and persisted reconciliation findings; it now has real runtime evidence from GitHub CI.
 
 Platform bundle exports establish compilation. Native configuration introspection establishes generated policy values. Neither proves a signed binary, device networking, native sharing, or UI behavior on an actual phone.
 
 ## Remaining acceptance gate
 
-Use a Docker-capable machine with a disposable fresh database/core and the worker stopped:
+Native device acceptance remains pending. To reproduce the completed server acceptance gate, use a Docker-capable machine with a disposable fresh database/core and the worker stopped:
 
 ```powershell
 node scripts/setup.mjs

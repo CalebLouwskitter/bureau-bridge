@@ -1,6 +1,6 @@
 # Development guide
 
-**v0.2 — second requirements review:** see [the review report](second-review.md) for gaps corrected and remaining runtime gates.
+**v0.2 — second requirements review:** see [the review report](second-review.md) for gaps corrected and [validation evidence](validation.md) for the completed GitHub runtime checks and remaining device gate.
 
 A working foundation for modernizing a fictional South African payroll bureau: PHP operations, a real COBOL batch core, a TypeScript bridge, Microsoft SQL Server, and an Expo client.
 
@@ -20,11 +20,11 @@ The bureau has been acquired by a fintech. An insurer is one of its employer cli
 | Local infrastructure  | Seven Docker Compose services with named volumes and health checks                                                                         |
 | Verification          | Core recovery tests, API/worker tests, legacy integration test, SQL integration test, full-stack smoke script, and GitHub Actions workflow |
 
-See [validation evidence](validation.md) for checks actually run and the remaining Docker/SQL Server gate.
+See [validation evidence](validation.md) for checks actually run, including the passed Docker/SQL Server CI scenario.
 
 ## Start on Windows with Docker Desktop
 
-Use Node.js 24 and Docker Desktop configured for Linux containers. Run these commands from the extracted `bureau-bridge` folder:
+Use Node.js 24 and Docker Desktop configured for Linux containers. Run these commands from the `bureau-bridge` repository root:
 
 ```powershell
 node scripts/setup.mjs
@@ -182,7 +182,7 @@ docker compose up -d scheduler
 
 The smoke test creates allocations, posts a normal batch, loses a later result, checks inquiry recovery, declines a suspended target, and checks private balances, reconciliation, and CSV reports. It changes local demo data. The SQL test expects an otherwise empty outbox and cleans up its own rows. `tests/legacy_integration.php` and the server's `test:legacy-http` are lower-level tests for a disposable legacy database/core; CI runs them before the worker starts.
 
-The GitHub Actions workflow installs dependencies, checks TypeScript and PHP syntax, runs core and real legacy HTTP/integration tests, builds containers, validates SQL behavior, and runs the full-stack smoke scenario. It is supplied but has not been run on GitHub in this session.
+The GitHub Actions workflow installs dependencies, checks TypeScript and PHP syntax, runs core and real legacy HTTP/integration tests, builds containers, validates SQL behavior, and runs the full-stack smoke scenario. [The validation record](validation.md) links to its successful GitHub execution.
 
 ## Updating from v0.1
 

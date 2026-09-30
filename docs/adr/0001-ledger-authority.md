@@ -27,4 +27,4 @@ The initial total is fixed at 10,000,000 cents. There are no deposit or external
 
 ## Verification
 
-[Core tests](../../tests/test_core.py) exercise failures before/after publication, replay/conflict, concurrent access, conservation, audit, and a v0.1 indexed-file upgrade. SQL projection ordering has a supplied [integration check](../../services/server/tests/sql.integration.ts); its runtime evidence remains pending in the review record.
+[Core tests](../../tests/test_core.py) exercise failures before/after publication, replay/conflict, concurrent access, conservation, audit, and a v0.1 indexed-file upgrade. SQL projection ordering is covered by the [integration check](../../services/server/tests/sql.integration.ts), which passed in [GitHub CI](https://github.com/CalebLouwskitter/bureau-bridge/actions/runs/36699107346).
