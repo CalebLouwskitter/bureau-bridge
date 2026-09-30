@@ -1,0 +1,30 @@
+CREATE TABLE IF NOT EXISTS requests (
+  reference CHAR(36) PRIMARY KEY,
+  source_account CHAR(12) NOT NULL,
+  target_account CHAR(12) NOT NULL,
+  amount_minor BIGINT UNSIGNED NOT NULL,
+  currency CHAR(3) NOT NULL,
+  fingerprint CHAR(64) NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'RECEIVED',
+  reason VARCHAR(40),
+  posting_id CHAR(36),
+  batch_id CHAR(36),
+  created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  INDEX request_queue (status, created_at),
+  CONSTRAINT amount_positive CHECK (amount_minor BETWEEN 1 AND 999999999999)
+);
+CREATE TABLE IF NOT EXISTS batch_runs (
+  id CHAR(36) PRIMARY KEY,
+  record_count INT NOT NULL,
+  amount_total BIGINT UNSIGNED NOT NULL,
+  checksum CHAR(64) NOT NULL,
+  status VARCHAR(24) NOT NULL,
+  created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+);
+CREATE TABLE IF NOT EXISTS inquiries (
+  id CHAR(36) PRIMARY KEY,
+  reference CHAR(36) NOT NULL,
+  outcome VARCHAR(24) NOT NULL,
+  created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+);

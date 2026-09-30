@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "BureauBridge",
+    "slug": "bureau-bridge",
+    "version": "0.2.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "dev.fenne.bureaubridge"
+    },
+    "android": {
+      "package": "dev.fenne.bureaubridge"
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}

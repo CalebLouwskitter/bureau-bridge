@@ -1,0 +1,30 @@
+{
+  "name": "@bureau/mobile",
+  "version": "0.2.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start --go",
+    "dev": "expo start --dev-client",
+    "android": "expo start --go --android",
+    "ios": "expo start --go --ios",
+    "web": "expo start --go --web",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@bureau/contracts": "0.2.0",
+    "@react-native-async-storage/async-storage": "^2.2.0",
+    "expo": "~57.0.25",
+    "expo-crypto": "~57.0.0",
+    "expo-dev-client": "~57.0.1",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-web": "^0.21.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  }
+}

@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430" role="img" aria-labelledby="title desc">
+  <title id="title">BureauBridge</title>
+  <desc id="desc">A payroll modernization lab connecting PHP and a COBOL ledger to a TypeScript bridge, SQL Server workflow state, and an Expo experience.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#101f31"/>
+      <stop offset="1" stop-color="#081720"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" x2="1">
+      <stop offset="0" stop-color="#d4a578"/>
+      <stop offset="1" stop-color="#79e1b6"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="430" rx="20" fill="url(#bg)"/>
+  <g stroke="#24394a" stroke-width="1" opacity="0.45">
+    <path d="M815 0V254M879 0V254M943 0V254M1007 0V254M1071 0V254M1135 0V254"/>
+    <path d="M789 52H1200M789 116H1200M789 180H1200M789 244H1200"/>
+  </g>
+  <g fill="none" stroke="#42646e" stroke-width="2">
+    <path d="M916 69H1056V181H1115"/>
+    <path d="M916 69V181H991"/>
+    <rect x="888" y="41" width="56" height="56" rx="14" fill="#192f3b" stroke="#79e1b6"/>
+    <rect x="1028" y="41" width="56" height="56" rx="14" fill="#192f3b"/>
+    <rect x="963" y="153" width="56" height="56" rx="14" fill="#192f3b" stroke="#d4a578"/>
+    <circle cx="1115" cy="181" r="8" fill="#79e1b6" stroke="none"/>
+  </g>
+  <g stroke="#aecac9" fill="none" stroke-width="2">
+    <path d="M903 59H929M903 68H929M903 77H920"/>
+    <path d="M1042 58H1070V80H1042ZM1049 63H1063M1049 72H1063"/>
+    <path d="M980 181L990 171L1001 181L990 192Z"/>
+  </g>
+  <g font-family="'Segoe UI', Inter, Arial, sans-serif">
+    <text x="62" y="53" fill="#79e1b6" font-size="13" font-weight="700" letter-spacing="3.5">LEGACY SYSTEMS / MODERN EXPERIENCE</text>
+    <text x="60" y="135" fill="#f4f8fa" font-size="72" font-weight="700" letter-spacing="-2">BureauBridge</text>
+    <text x="64" y="179" fill="#aec3d0" font-size="24">A payroll modernization lab.</text>
+    <g font-size="12" font-weight="600">
+      <rect x="64" y="209" width="99" height="30" rx="15" fill="#382e29"/>
+      <text x="113.5" y="229" text-anchor="middle" fill="#e8bc98">GnuCOBOL</text>
+      <rect x="173" y="209" width="66" height="30" rx="15" fill="#2a2d48"/>
+      <text x="206" y="229" text-anchor="middle" fill="#c7c8f3">PHP</text>
+      <rect x="249" y="209" width="112" height="30" rx="15" fill="#16394c"/>
+      <text x="305" y="229" text-anchor="middle" fill="#96d2f4">TypeScript</text>
+      <rect x="371" y="209" width="113" height="30" rx="15" fill="#233d40"/>
+      <text x="427.5" y="229" text-anchor="middle" fill="#9fdec7">SQL Server</text>
+      <rect x="494" y="209" width="73" height="30" rx="15" fill="#263746"/>
+      <text x="530.5" y="229" text-anchor="middle" fill="#d3e2eb">Expo</text>
+    </g>
+    <rect x="64" y="277" width="437" height="112" rx="14" fill="#182a36" stroke="#445052"/>
+    <text x="86" y="304" fill="#dfb28a" font-size="11" font-weight="700" letter-spacing="2">LEGACY AUTHORITY</text>
+    <text x="86" y="337" fill="#edf4f6" font-size="21" font-weight="600">PHP intake · COBOL core</text>
+    <text x="86" y="367" fill="#9ab2c0" font-size="14">Batch files and an indexed ledger</text>
+    <rect x="699" y="277" width="437" height="112" rx="14" fill="#143331" stroke="#386457"/>
+    <text x="721" y="304" fill="#79e1b6" font-size="11" font-weight="700" letter-spacing="2">MODERN EXPERIENCE</text>
+    <text x="721" y="337" fill="#edf8f2" font-size="21" font-weight="600">TypeScript bridge · Expo client</text>
+    <text x="721" y="367" fill="#a0c1b8" font-size="14">Workflow state in Microsoft SQL Server</text>
+    <text x="600" y="376" fill="#a2b9c4" font-size="11" text-anchor="middle" letter-spacing="1">DURABLE REFERENCES</text>
+  </g>
+  <g stroke="url(#line)" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M529 317H671L662 309M671 317L662 325"/>
+    <path d="M671 343H529L538 335M529 343L538 351"/>
+  </g>
+</svg>

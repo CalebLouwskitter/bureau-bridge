@@ -1,0 +1,131 @@
+name: bureau-bridge
+x-legacy-env: &legacy-env
+  LEGACY_DB_HOST: mariadb
+  LEGACY_DB_NAME: legacy_portal
+  LEGACY_DB_USER: legacy
+  LEGACY_DB_PASSWORD: ${LEGACY_DB_PASSWORD:?Run node scripts/setup.mjs}
+  LEGACY_BRIDGE_KEY: ${LEGACY_BRIDGE_KEY:?Run setup}
+  LEGACY_OPS_KEY: ${LEGACY_OPS_KEY:?Run setup}
+  DEMO_PASSWORD: ${DEMO_PASSWORD:?Run setup}
+  CORE_ROOT: /data/core
+  EXCHANGE_ROOT: /data/exchange
+  TZ: Africa/Johannesburg
+x-modern-env: &modern-env
+  MSSQL_HOST: sqlserver
+  MSSQL_DATABASE: BureauBridge
+  MSSQL_USER: bureau_app
+  MSSQL_PASSWORD: ${MSSQL_PASSWORD:?Run setup}
+  MSSQL_TRUST_CERT: "true"
+  LEGACY_URL: http://legacy:8080
+  LEGACY_BRIDGE_KEY: ${LEGACY_BRIDGE_KEY:?Run setup}
+services:
+  mariadb:
+    image: mariadb:11.4
+    environment:
+      MARIADB_DATABASE: legacy_portal
+      MARIADB_USER: legacy
+      MARIADB_PASSWORD: ${LEGACY_DB_PASSWORD:?Run setup}
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?Run setup}
+    volumes:
+      - portal_db:/var/lib/mysql
+      - ./database/legacy:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?Run setup}
+    volumes: [modern_db:/var/opt/mssql]
+    healthcheck:
+      test:
+        [
+          CMD-SHELL,
+          '/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -C -Q "SELECT 1" -b -o /dev/null',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+    restart: unless-stopped
+  legacy:
+    build: { context: ., dockerfile: legacy/Dockerfile }
+    environment: *legacy-env
+    volumes: [core_files:/data/core, exchange_files:/data/exchange]
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on: { mariadb: { condition: service_healthy } }
+    healthcheck:
+      test:
+        [
+          CMD,
+          php,
+          -r,
+          'exit(file_get_contents("http://localhost:8080/health") === false ? 1 : 0);',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  scheduler:
+    build: { context: ., dockerfile: legacy/Dockerfile }
+    command: [python3, /app/scheduler.py]
+    environment:
+      <<: *legacy-env
+      BATCH_TIMES: ${BATCH_TIMES:-08:00,12:00,16:00,23:00}
+    volumes: [core_files:/data/core, exchange_files:/data/exchange]
+    depends_on: { legacy: { condition: service_healthy } }
+    restart: unless-stopped
+  sql-init:
+    build: { context: ., dockerfile: services/server/Dockerfile }
+    command: [npm, run, migrate, --workspace, "@bureau/server"]
+    environment:
+      <<: *modern-env
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?Run setup}
+    depends_on: { sqlserver: { condition: service_healthy } }
+    restart: "no"
+  api:
+    build: { context: ., dockerfile: services/server/Dockerfile }
+    environment:
+      <<: *modern-env
+      LEGACY_OPS_KEY: ${LEGACY_OPS_KEY:?Run setup}
+      SESSION_SECRET: ${SESSION_SECRET:?Run setup}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:?Run setup}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8081,http://localhost:19006}
+    ports: ["${API_BIND:-127.0.0.1}:3000:3000"]
+    depends_on:
+      sql-init: { condition: service_completed_successfully }
+      legacy: { condition: service_healthy }
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          'fetch("http://localhost:3000/health").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  worker:
+    build: { context: ., dockerfile: services/server/Dockerfile }
+    command: [npm, run, worker]
+    environment:
+      <<: *modern-env
+      ACCOUNT_SYNC_SECONDS: ${ACCOUNT_SYNC_SECONDS:-30}
+      RECONCILE_SECONDS: ${RECONCILE_SECONDS:-300}
+    depends_on:
+      sql-init: { condition: service_completed_successfully }
+      legacy: { condition: service_healthy }
+    restart: unless-stopped
+volumes:
+  portal_db:
+  modern_db:
+  core_files:
+  exchange_files:

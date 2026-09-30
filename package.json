@@ -1,0 +1,27 @@
+{
+  "name": "bureau-bridge",
+  "version": "0.2.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "services/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm test --workspace @bureau/server",
+    "test:core": "python3 -m unittest discover -s tests -p 'test_core.py' -v",
+    "api": "npm run api --workspace @bureau/server",
+    "worker": "npm run worker --workspace @bureau/server",
+    "mobile": "npm start --workspace @bureau/mobile",
+    "web": "npm run web --workspace @bureau/mobile",
+    "smoke": "node --env-file=.env scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "prettier": "3.6.2"
+  }
+}

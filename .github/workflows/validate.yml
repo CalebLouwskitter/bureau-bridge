@@ -1,0 +1,26 @@
+name: Validate infrastructure
+on: [push, pull_request]
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "24", cache: npm }
+      - run: npm ci
+      - run: npm run typecheck && npm test
+      - run: sudo apt-get update && sudo apt-get install -y gnucobol php-cli
+      - run: npm run test:core
+      - run: for file in legacy/php/*.php tests/*.php; do php -l "$file" || exit 1; done
+      - run: node scripts/setup.mjs
+      - run: docker compose config --quiet
+      - run: docker compose up --build -d --wait api
+      - run: docker compose exec -T legacy php /app/tests/legacy_integration.php
+      - run: docker compose exec -T api npm run test:legacy-http --workspace @bureau/server
+      - run: docker compose exec -T api npm run test:sql --workspace @bureau/server
+      - run: docker compose up --build -d --wait worker
+      - run: npm run smoke
+      - if: always()
+        run: docker compose logs --no-color
+      - if: always()
+        run: docker compose down
