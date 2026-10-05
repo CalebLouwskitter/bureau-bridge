@@ -19,9 +19,11 @@
     "worker": "npm run worker --workspace @bureau/server",
     "mobile": "npm start --workspace @bureau/mobile",
     "web": "npm run web --workspace @bureau/mobile",
-    "smoke": "node --env-file=.env scripts/smoke.mjs"
+    "smoke": "node --env-file=.env scripts/smoke.mjs",
+    "test:mobile:web": "node scripts/test-mobile-ui.mjs"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "prettier": "3.6.2"
   }
 }
