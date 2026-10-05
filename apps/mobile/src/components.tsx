@@ -1,11 +1,6 @@
 import React from "react";
 import { Button, Text, XStack, YStack } from "tamagui";
-import {
-  ArrowUpRight,
-  CheckCircle2,
-  Clock3,
-  AlertTriangle,
-} from "lucide-react-native";
+import { CheckCircle2, Clock3, AlertTriangle } from "lucide-react-native";
 import { type Allocation, type Status } from "@bureau/contracts";
 import { useAppearance } from "./AppearanceProvider";
 import { accountName, money, statusLabels, timestamp } from "./presentation";
@@ -40,6 +35,8 @@ export function Heading({
   return (
     <Text
       accessibilityRole="header"
+      role="heading"
+      aria-level={large ? 1 : 2}
       fontSize={large ? 32 : 20}
       lineHeight={large ? 39 : 27}
       fontWeight="700"
@@ -84,6 +81,7 @@ export function ActionButton({
     <Button
       testID={testID}
       accessibilityLabel={label}
+      aria-label={label}
       onPress={onPress}
       disabled={disabled}
       icon={icon}
@@ -171,21 +169,15 @@ export function StatusBadge({ status }: { status: Status }) {
 }
 
 export function AllocationSummary({ allocation }: { allocation: Allocation }) {
-  const { palette: p } = useAppearance();
   return (
     <Card>
-      <XStack alignItems="center" gap={12}>
-        <YStack
-          width={44}
-          height={44}
-          borderRadius={14}
-          backgroundColor="$accentSoft"
-          alignItems="center"
-          justifyContent="center"
-        >
-          <ArrowUpRight size={21} color={p.accentStrong} aria-hidden />
-        </YStack>
-        <YStack flex={1} gap={3}>
+      <XStack
+        alignItems="flex-start"
+        justifyContent="space-between"
+        gap={12}
+        flexWrap="wrap"
+      >
+        <YStack flex={1} minWidth={110} gap={3}>
           <Text color="$color" fontSize={15} lineHeight={21} fontWeight="600">
             {accountName(allocation.targetAccount)}
           </Text>
@@ -193,10 +185,10 @@ export function AllocationSummary({ allocation }: { allocation: Allocation }) {
             {timestamp(allocation.updatedAt)}
           </Body>
         </YStack>
+        <Text color="$color" fontSize={20} lineHeight={27} fontWeight="600">
+          {money(allocation.amountMinor)}
+        </Text>
       </XStack>
-      <Text color="$color" fontSize={25} lineHeight={32} fontWeight="600">
-        {money(allocation.amountMinor)}
-      </Text>
       <StatusBadge status={allocation.status} />
     </Card>
   );

@@ -35,7 +35,7 @@ type Bureau = ReturnType<typeof useBureau>;
 type Navigate = (tab: "home" | "allocate" | "activity" | "operations") => void;
 
 export function SignIn({ bureau: b }: { bureau: Bureau }) {
-  const { palette: p } = useAppearance();
+  const { palette: p, mode } = useAppearance();
   const [showPassword, setShowPassword] = useState(false);
   return (
     <YStack gap={24}>
@@ -77,7 +77,9 @@ export function SignIn({ bureau: b }: { bureau: Bureau }) {
               fontWeight="600"
               disabled={b.busy}
               accessibilityLabel={`Choose ${label} demo role`}
+              aria-label={`Choose ${label} demo role`}
               accessibilityState={{ selected: b.username === username }}
+              aria-pressed={b.username === username}
               backgroundColor={
                 b.username === username ? "$accentSoft" : "$surfaceMuted"
               }
@@ -102,7 +104,9 @@ export function SignIn({ bureau: b }: { bureau: Bureau }) {
             autoCorrect={false}
             disabled={b.busy}
             accessibilityLabel="Username"
+            aria-label="Username"
             autoComplete="username"
+            keyboardAppearance={mode}
             minHeight={52}
             fontSize={15}
             borderRadius={14}
@@ -128,7 +132,9 @@ export function SignIn({ bureau: b }: { bureau: Bureau }) {
               autoCapitalize="none"
               autoCorrect={false}
               autoComplete="current-password"
+              keyboardAppearance={mode}
               accessibilityLabel="Password"
+              aria-label="Password"
               placeholder="Demo password"
               placeholderTextColor="$muted"
               returnKeyType="go"
@@ -151,6 +157,7 @@ export function SignIn({ bureau: b }: { bureau: Bureau }) {
               accessibilityLabel={
                 showPassword ? "Hide password" : "Show password"
               }
+              aria-label={showPassword ? "Hide password" : "Show password"}
               onPress={() => setShowPassword(!showPassword)}
             >
               {showPassword ? (
@@ -268,6 +275,20 @@ export function Home({
           </Body>
         </Card>
       )}
+      <YStack gap={12}>
+        <XStack alignItems="center" justifyContent="space-between" gap={8}>
+          <Heading>Recent activity</Heading>
+          <TextAction onPress={() => navigate("activity")}>See all</TextAction>
+        </XStack>
+        {b.rows.slice(0, 2).map((allocation) => (
+          <AllocationSummary key={allocation.id} allocation={allocation} />
+        ))}
+        {!b.rows.length && (
+          <EmptyState title="A fresh start">
+            Your allocations will appear here once a request is received.
+          </EmptyState>
+        )}
+      </YStack>
       {!!other.length && (
         <YStack gap={12}>
           <Heading>Employee balances</Heading>
@@ -300,20 +321,6 @@ export function Home({
           </Card>
         </YStack>
       )}
-      <YStack gap={12}>
-        <XStack alignItems="center" justifyContent="space-between" gap={8}>
-          <Heading>Recent activity</Heading>
-          <TextAction onPress={() => navigate("activity")}>See all</TextAction>
-        </XStack>
-        {b.rows.slice(0, 3).map((allocation) => (
-          <AllocationSummary key={allocation.id} allocation={allocation} />
-        ))}
-        {!b.rows.length && (
-          <EmptyState title="A fresh start">
-            Your allocations will appear here once a request is received.
-          </EmptyState>
-        )}
-      </YStack>
       <DemoNote />
     </YStack>
   );
@@ -326,7 +333,7 @@ export function Allocate({
   bureau: Bureau;
   navigate: Navigate;
 }) {
-  const { palette: p } = useAppearance();
+  const { palette: p, mode } = useAppearance();
   const locked = b.busy || !!b.pending;
   return (
     <YStack gap={22}>
@@ -344,11 +351,15 @@ export function Allocate({
             disabled={locked}
             onPress={() => b.setEmployee(id)}
             accessibilityRole="radio"
+            role="radio"
             accessibilityLabel={`Employee ${index + 1}${index === 2 ? ", suspended" : ""}`}
+            aria-label={`Employee ${index + 1}${index === 2 ? ", suspended" : ""}`}
             accessibilityState={{
               checked: b.employee === id,
               disabled: locked,
             }}
+            aria-disabled={locked}
+            aria-checked={b.employee === id}
             minHeight={78}
             height="auto"
             padding={14}
@@ -402,10 +413,12 @@ export function Allocate({
         <Input
           keyboardType="decimal-pad"
           inputMode="decimal"
+          keyboardAppearance={mode}
           value={b.amount}
           disabled={locked}
           onChangeText={b.setAmount}
           accessibilityLabel="Amount in rand"
+          aria-label="Amount in rand"
           minHeight={72}
           fontSize={30}
           fontWeight="600"
@@ -498,6 +511,7 @@ export function Activity({ bureau: b }: { bureau: Bureau }) {
             fontSize={12}
             fontWeight="600"
             accessibilityState={{ selected: filter === value }}
+            aria-pressed={filter === value}
             backgroundColor={filter === value ? "$accentSoft" : "$surface"}
             borderColor={filter === value ? "$accentStrong" : "$borderColor"}
             color="$color"

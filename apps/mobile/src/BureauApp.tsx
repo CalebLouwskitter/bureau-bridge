@@ -115,6 +115,9 @@ export function BureauApp() {
             accessibilityLabel={
               mode === "light" ? "Use dark appearance" : "Use light appearance"
             }
+            aria-label={
+              mode === "light" ? "Use dark appearance" : "Use light appearance"
+            }
             focusStyle={{ outlineColor: "$accentStrong", outlineWidth: 2 }}
           >
             {mode === "light" ? (
@@ -134,6 +137,7 @@ export function BureauApp() {
               borderColor="$borderColor"
               onPress={signOut}
               accessibilityLabel="Sign out"
+              aria-label="Sign out"
               opacity={b.busy ? 0.45 : 1}
               focusStyle={{ outlineColor: "$accentStrong", outlineWidth: 2 }}
             >
@@ -163,7 +167,12 @@ export function BureauApp() {
               gap={10}
               alignItems="flex-start"
             >
-              <Body color="$warning" flex={1} accessibilityLiveRegion="polite">
+              <Body
+                color="$warning"
+                flex={1}
+                accessibilityLiveRegion="polite"
+                aria-live="polite"
+              >
                 {b.message}
               </Body>
               <Button
@@ -173,6 +182,7 @@ export function BureauApp() {
                 borderRadius={12}
                 chromeless
                 accessibilityLabel="Dismiss message"
+                aria-label="Dismiss message"
                 onPress={b.clearMessage}
               >
                 <X size={18} color={p.warning} aria-hidden />
@@ -182,7 +192,9 @@ export function BureauApp() {
           {b.busy && (
             <XStack gap={10} alignItems="center" justifyContent="center">
               <ActivityIndicator color={p.accentStrong} />
-              <Body accessibilityLiveRegion="polite">Working…</Body>
+              <Body accessibilityLiveRegion="polite" aria-live="polite">
+                Working…
+              </Body>
             </XStack>
           )}
           {!b.token ? (
@@ -207,6 +219,7 @@ export function BureauApp() {
           >
             <XStack
               accessibilityRole="tablist"
+              role="tablist"
               width="100%"
               maxWidth={600}
               alignSelf="center"
@@ -220,8 +233,11 @@ export function BureauApp() {
                   flex={1}
                   minWidth={0}
                   accessibilityRole="tab"
+                  role="tab"
                   accessibilityLabel={`${label} tab`}
+                  aria-label={`${label} tab`}
                   accessibilityState={{ selected: tab === id }}
+                  aria-selected={tab === id}
                   onPress={() => setTab(id)}
                   minHeight={58}
                   borderRadius={16}
