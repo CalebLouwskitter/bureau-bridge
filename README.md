@@ -56,6 +56,18 @@ Requests cross an asynchronous boundary. Intake is an acknowledgement; a core re
 
 The core is intentionally a single writer on a local Linux filesystem. Read projections show their core timestamp and source generation. [The architecture decisions](docs/adr/0001-ledger-authority.md) explain the authority boundary, and [the recovery decision](docs/adr/0002-delivery-and-recovery.md) explains retries and inquiry.
 
+## Mobile experience
+
+**Soft fintech · Tamagui · light first · black and mint dark mode.**
+
+The Expo client pairs a mint balance card and rounded surfaces with **Home / Allocate / Activity** bottom tabs. Employees get their own balance and activity; operations gets a dedicated reconciliation tab. The appearance toggle remembers your choice. Allocation retries retain their original reference, including after an app restart.
+
+| Light — default | Black + mint |
+| --- | --- |
+| ![BureauBridge light dashboard](docs/assets/mobile-light.png) | ![BureauBridge black and mint dashboard](docs/assets/mobile-dark.png) |
+
+Browser captures of the implemented Expo interface using fictional UI-test fixtures. [Design tokens, role views, and local verification](docs/mobile-design.md) document the mobile slice. This feature branch uses focused commits with CI skipped; the badge above tracks `main`.
+
 ## Run the demo
 
 Use **Node.js 24**, **Docker Compose**, and Docker configured for Linux containers. On Windows, use Docker Desktop. SQL Server uses the `linux/amd64` image; other host architectures need a compatible Docker setup.
@@ -87,7 +99,7 @@ For **Android/iOS**, run `npm run mobile` to start Expo Go. Android emulator API
 
 ## The demo to try first
 
-1. Sign in as `insurer-admin`, send **R250.00** to Employee 1, and wait for **Awaiting payroll batch**.
+1. Sign in as `insurer-admin`, open **Allocate**, send **R250.00** to Employee 1, and wait for **Awaiting payroll batch**.
 2. Run a normal batch from the PHP portal or terminal:
 
    ```powershell
@@ -104,8 +116,8 @@ For **Android/iOS**, run `npm run mobile` to start Expo Go. Android emulator API
 
    The command exits with an injected error **after core commit**. The displayed request becomes **Verifying core outcome**.
 
-4. Sign in as `ops` and choose **Run core inquiry**. The core returns the original journal outcome. PHP imports it, and the worker updates the modern view using the same reference.
-5. Run **Reconciliation** to inspect the captured state across systems and export its CSV report. During the unresolved interval, a comparison can show that the core has posted while an import is pending.
+4. Sign in as `ops`, open **Activity**, and choose **Run core inquiry**. The core returns the original journal outcome. PHP imports it, and the worker updates the modern view using the same reference.
+5. Open **Ops** and run **Run comparison** to inspect the captured state across systems and export its CSV report. During the unresolved interval, a comparison can show that the core has posted while an import is pending.
 
 The separate **Verify and resume** action checks the journal before requeueing an unposted request. A committed request keeps its final outcome. [The executable core tests](tests/test_core.py) exercise publication failures and concurrent replay directly.
 

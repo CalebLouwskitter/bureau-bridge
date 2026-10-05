@@ -2,6 +2,22 @@
 
 The local second review was performed on 30 September 2026. The project was subsequently published to GitHub and validated there; no application deployment was created.
 
+## Soft fintech mobile slice — 5 October 2026
+
+The Expo redesign is developed on `feature/mobile-soft-fintech` in focused commits with `[skip ci]`, as requested. This slice was validated locally; it has no new GitHub CI result.
+
+| Check | Result |
+| --- | --- |
+| TypeScript | Server and mobile checks passed |
+| Existing API/worker/contracts/reconciliation tests | 14 passed |
+| Browser interaction checks | 5 passed against the exported Expo app and an isolated fictional API fixture |
+| Browser scenarios | Light default with a dark OS preference; saved black/mint and light choices; masked/showable password; retry with the same UUID and integer-cent payload after restart; decimal comma entry and invalid grouping rejection; employee views/history; operations inquiry/resumption/comparison/CSV download |
+| Narrow layout | 320-pixel layout checked across operations tabs, including dark mode, visible 44-point tab targets and no JavaScript runtime errors |
+| Platform exports | Web JavaScript and Android/iOS Hermes bundles exported successfully |
+| Visual review | Light and black/mint dashboard captures inspected; documented in [the mobile design guide](mobile-design.md) |
+
+The browser checks establish client behaviour at a mocked HTTP boundary. The separate server suite covers API roles and ownership. Android/iOS binaries, device networking, keyboards, native sharing, and screen-reader behaviour on phones still need device acceptance. The historical real Docker/SQL Server evidence below remains attached to its original commit and run.
+
 ## GitHub runtime verification
 
 [GitHub Actions run 36699107346](https://github.com/CalebLouwskitter/bureau-bridge/actions/runs/36699107346) passed on 30 September 2026 against [code commit 4c336af](https://github.com/CalebLouwskitter/bureau-bridge/commit/4c336af8be8bb20eee3d95d07699051a1601556e). It verified:

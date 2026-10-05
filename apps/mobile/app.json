@@ -4,7 +4,8 @@
     "slug": "bureau-bridge",
     "version": "0.2.0",
     "orientation": "portrait",
-    "userInterfaceStyle": "dark",
+    "userInterfaceStyle": "automatic",
+    "backgroundColor": "#F4F7F5",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "dev.fenne.bureaubridge"

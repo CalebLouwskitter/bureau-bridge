@@ -10,3 +10,5 @@ __pycache__/
 *.log
 data/
 coverage/
+test-results/
+playwright-report/

@@ -66,10 +66,16 @@ npm run mobile
 - The local config plugin permits HTTP in development/preview builds so the lab API can be reached. The `production` EAS profile requires an HTTPS `EXPO_PUBLIC_API_URL` and disables that exception. Set this public URL in your EAS build environment before a production build.
 - `eas.json` includes development, Android preview APK, and production profiles. Android/iOS JavaScript bundling does not prove a native binary was built or tested.
 
+## Mobile appearance and navigation
+
+The app starts in light mode. Use the moon/sun button for black-and-mint dark mode; your choice is retained on this device. Home shows timestamped core balances and recent activity. Allocate contains the payroll form; Activity contains the register, filters, history, and operations recovery controls. Operations users also have an Ops tab for comparisons and CSV export.
+
+[The mobile design guide](mobile-design.md) covers the Tamagui configuration, colours, roles, browser checks, and screenshots.
+
 ## First allocation
 
 1. Sign in to the Expo app as `insurer-admin`.
-2. Send **R250.00** to Employee 1. The TypeScript API records **25,000 cents** and an outbox row in one SQL transaction.
+2. Open **Allocate** and send **R250.00** to Employee 1. The TypeScript API records **25,000 cents** and an outbox row in one SQL transaction.
 3. The worker submits the same immutable reference to PHP. The client shows **Awaiting payroll batch**.
 4. Open the PHP portal and click **Run pending batch**, or run:
 
@@ -92,7 +98,7 @@ The scheduler also runs at 08:00, 12:00, 16:00, and 23:00 in `Africa/Johannesbur
 
    This deliberately exits with an error _after_ the core has committed, while withholding result import. The request becomes **Verifying core outcome**.
 
-3. Sign in as `ops` and choose **Run core inquiry** on that allocation. The core returns its previously committed reference; PHP reconciles it and the worker updates the modern view.
+3. Sign in as `ops`, open **Activity**, and choose **Run core inquiry** on that allocation. The core returns its previously committed reference; PHP reconciles it and the worker updates the modern view.
 4. **Verify and resume** also handles a request the core never committed. The legacy side checks its journal under the batch lock before returning an unposted request to intake. A committed request stays committed.
 
 The client stores an unfinished request reference before sending it. Retrying after a network error or an app restart preserves that reference. API and core uniqueness checks enforce replay behavior independently.
