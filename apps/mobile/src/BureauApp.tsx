@@ -48,7 +48,7 @@ export function BureauApp() {
 
   useEffect(() => {
     scroll.current?.scrollTo({ y: 0, animated: false });
-  }, [tab, b.message]);
+  }, [tab, b.message, b.token]);
 
   function signOut() {
     if (b.busy) return;
@@ -146,6 +146,7 @@ export function BureauApp() {
           )}
         </XStack>
         <ScrollView
+          testID="screen-scroll"
           ref={scroll}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"

@@ -201,9 +201,6 @@ export function Home({
   return (
     <YStack gap={22}>
       <YStack gap={8}>
-        <Eyebrow>
-          {employee ? "YOUR PAYROLL OVERVIEW" : "PAYROLL OVERVIEW"}
-        </Eyebrow>
         <Heading large>
           {employee ? "Your pay, clearly." : "Payroll, connected."}
         </Heading>
@@ -429,8 +426,8 @@ export function Allocate({
           focusStyle={{ borderColor: "$accentStrong" }}
         />
         <Body fontSize={12} lineHeight={19}>
-          From the insurer's prefunded account. Demo core limit: R50,000 per
-          allocation.
+          From the insurer's prefund. Use 250.00 or 250,00, without thousand
+          separators. Demo limit: R50,000 per allocation.
         </Body>
         {b.pending && (
           <YStack

@@ -132,11 +132,15 @@ export function useBureau() {
   }
   async function allocate() {
     if (actionBusy.current) return;
-    if (!/^\d{1,10}(\.\d{1,2})?$/.test(amount)) {
-      setMessage("Enter a rand amount with at most two decimal places.");
+    // Decimal pads may use a comma. Grouping separators remain unsupported.
+    const normalized = amount.replace(",", ".");
+    if (!/^\d{1,10}(\.\d{1,2})?$/.test(normalized)) {
+      setMessage(
+        "Enter rand with at most two decimal places, e.g. 250.00 or 250,00.",
+      );
       return;
     }
-    const [whole, fraction = ""] = amount.split(".");
+    const [whole, fraction = ""] = normalized.split(".");
     const cents = Number(whole) * 100 + Number(fraction.padEnd(2, "0"));
     if (!Number.isSafeInteger(cents) || cents < 1 || cents > 999999999999) {
       setMessage("Amount is outside the supported range.");
