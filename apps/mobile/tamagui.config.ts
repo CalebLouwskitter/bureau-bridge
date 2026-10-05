@@ -1,4 +1,5 @@
-import { defaultConfig } from "@tamagui/config/v5";
+import { createSystemFont, defaultConfig } from "@tamagui/config/v5";
+import { Platform } from "react-native";
 import { createTamagui } from "tamagui";
 import { palettes } from "./src/palettes";
 
@@ -23,6 +24,24 @@ function theme(mode: "light" | "dark") {
 
 export const tamaguiConfig = createTamagui({
   ...defaultConfig,
+  fonts: {
+    body: createSystemFont({
+      font: {
+        family:
+          Platform.OS === "web"
+            ? "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+            : "System",
+      },
+    }),
+    heading: createSystemFont({
+      font: {
+        family:
+          Platform.OS === "web"
+            ? "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+            : "System",
+      },
+    }),
+  },
   themes: { light: theme("light"), dark: theme("dark") },
   settings: {
     ...defaultConfig.settings,

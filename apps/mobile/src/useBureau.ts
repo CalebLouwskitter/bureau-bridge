@@ -169,8 +169,9 @@ export function useBureau() {
       });
       await AsyncStorage.removeItem("bureau-pending:" + principal!.username);
       pending.current = null;
-      setMessage("Received. Follow the batch status below.");
+      setMessage("Request received. Follow the batch status in Activity.");
       await refresh();
+      return true;
     } catch (error) {
       setMessage(
         (error as Error).message + " · Retry sends the same request reference.",
@@ -279,6 +280,7 @@ export function useBureau() {
     message,
     busy,
     pending: pending.current,
+    clearMessage: () => setMessage(""),
     login,
     signOut,
     allocate,
