@@ -1,4 +1,4 @@
-import Fastify from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { parseAllocation, UUID, type Principal } from "@bureau/contracts";
@@ -6,6 +6,17 @@ import { Conflict, type Store } from "./store.ts";
 import type { Legacy } from "./legacy.ts";
 import { equal, issue, verify } from "./auth.ts";
 import { reconcile, reportCsv } from "./reconciliation.ts";
+import {
+  BankUnavailable,
+  generateFile,
+  importResponse,
+  NotFound,
+  payoutInput,
+  submitFile,
+  type Bank,
+  type PayoutStore,
+} from "./payouts.ts";
+import { EftError } from "./eft.ts";
 declare module "fastify" {
   interface FastifyRequest {
     principal?: Principal;
@@ -20,6 +31,7 @@ export function makeApp(
     origins?: string[];
     health?: () => Promise<void>;
     logger?: boolean;
+    payouts?: { store: PayoutStore; bank: Bank };
   },
 ) {
   const app = Fastify({
@@ -95,7 +107,14 @@ export function makeApp(
   app.post("/reconciliation", async (request, reply) => {
     if (request.principal!.role !== "ops")
       return reply.code(403).send({ error: "Operations role required" });
-    return { run: await reconcile(store, legacy, request.principal!.clientId) };
+    return {
+      run: await reconcile(
+        store,
+        legacy,
+        request.principal!.clientId,
+        options.payouts?.store,
+      ),
+    };
   });
   app.get("/reconciliation/report.csv", async (request, reply) => {
     if (request.principal!.role !== "ops")
@@ -193,6 +212,7 @@ export function makeApp(
       return { status: "RESUMED_WITH_ORIGINAL_REFERENCE" };
     },
   );
+  if (options.payouts) registerPayouts(app, options.payouts);
   app.setErrorHandler((error, request, reply) => {
     request.log.error({ err: error }, "Request failed");
     const code = (error as { statusCode?: number }).statusCode;
@@ -202,4 +222,126 @@ export function makeApp(
     });
   });
   return app;
+}
+
+// The payments hub: payout instructions, EFT files and bank responses.
+function registerPayouts(
+  app: FastifyInstance,
+  { store, bank }: { store: PayoutStore; bank: Bank },
+) {
+  const ops = (request: { principal?: Principal }) =>
+    request.principal!.role === "ops";
+  const fail = (error: unknown) => {
+    if (error instanceof NotFound) return [404, error.message] as const;
+    if (error instanceof Conflict) return [409, error.message] as const;
+    if (error instanceof EftError) return [400, error.message] as const;
+    if (error instanceof BankUnavailable) return [502, error.message] as const;
+    throw error;
+  };
+  app.post("/payouts", async (request, reply) => {
+    const p = request.principal!;
+    if (p.role === "employee")
+      return reply.code(403).send({ error: "Payroll role required" });
+    const key = request.headers["idempotency-key"];
+    if (typeof key !== "string" || !UUID.test(key))
+      return reply
+        .code(400)
+        .send({ error: "Supply a UUID Idempotency-Key header" });
+    let input;
+    try {
+      input = payoutInput(request.body);
+    } catch (error) {
+      return reply.code(400).send({ error: (error as Error).message });
+    }
+    try {
+      return reply
+        .code(202)
+        .send(await store.createPayout(p.clientId, key, input));
+    } catch (error) {
+      const [code, message] = fail(error);
+      return reply.code(code).send({ error: message });
+    }
+  });
+  app.get("/payouts", async (request) => {
+    const p = request.principal!;
+    return { payouts: await store.listPayouts(p.clientId, p.employeeAccount) };
+  });
+  app.post("/payout-files", async (request, reply) => {
+    if (!ops(request))
+      return reply.code(403).send({ error: "Operations role required" });
+    const key = request.headers["idempotency-key"];
+    if (typeof key !== "string" || !UUID.test(key))
+      return reply
+        .code(400)
+        .send({ error: "Supply a UUID Idempotency-Key header" });
+    const file = await generateFile(store, request.principal!.clientId, key);
+    if (!file)
+      return reply
+        .code(409)
+        .send({ error: "No debited payouts are waiting for a bank file" });
+    return reply.code(201).send(file);
+  });
+  app.get("/payout-files", async (request, reply) => {
+    if (!ops(request))
+      return reply.code(403).send({ error: "Operations role required" });
+    return { files: await store.listPayoutFiles(request.principal!.clientId) };
+  });
+  app.get<{ Params: { id: string } }>(
+    "/payout-files/:id/eft.txt",
+    async (request, reply) => {
+      if (!ops(request))
+        return reply.code(403).send({ error: "Operations role required" });
+      const file = UUID.test(request.params.id)
+        ? await store.payoutFile(request.principal!.clientId, request.params.id)
+        : undefined;
+      if (!file)
+        return reply.code(404).send({ error: "Payout file not found" });
+      return reply
+        .type("text/plain; charset=utf-8")
+        .header("X-Content-SHA256", file.sha256)
+        .header(
+          "Content-Disposition",
+          `attachment; filename="BUREAU01-${String(file.generation).padStart(6, "0")}.txt"`,
+        )
+        .send(file.content);
+    },
+  );
+  app.post<{ Params: { id: string } }>(
+    "/payout-files/:id/submit",
+    async (request, reply) => {
+      if (!ops(request))
+        return reply.code(403).send({ error: "Operations role required" });
+      if (!UUID.test(request.params.id))
+        return reply.code(404).send({ error: "Payout file not found" });
+      try {
+        return await submitFile(
+          store,
+          bank,
+          request.principal!.clientId,
+          request.params.id,
+        );
+      } catch (error) {
+        const [code, message] = fail(error);
+        return reply.code(code).send({ error: message });
+      }
+    },
+  );
+  app.post("/bank-responses", async (request, reply) => {
+    if (!ops(request))
+      return reply.code(403).send({ error: "Operations role required" });
+    if (typeof request.body !== "string")
+      return reply
+        .code(415)
+        .send({ error: "Send the bank response file as text/plain" });
+    try {
+      return await importResponse(
+        store,
+        request.principal!.clientId,
+        request.body,
+      );
+    } catch (error) {
+      const [code, message] = fail(error);
+      return reply.code(code).send({ error: message });
+    }
+  });
 }

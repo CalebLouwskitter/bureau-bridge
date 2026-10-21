@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
     "test:sql": "node --import tsx tests/sql.integration.ts",
-    "test:legacy-http": "node --import tsx tests/legacy.http.ts"
+    "test:legacy-http": "node --import tsx tests/legacy.http.ts",
+    "bank": "node --import tsx src/bank-main.ts"
   },
   "dependencies": {
     "@bureau/contracts": "0.2.0",

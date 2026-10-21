@@ -1,10 +1,13 @@
-import { connection, SqlStore } from "./store.ts";
+import { connection } from "./store.ts";
+import { SqlPayoutStore } from "./payout-store.ts";
+import { BankClient } from "./payouts.ts";
 import { env } from "./config.ts";
 import { LegacyClient } from "./legacy.ts";
 import { makeApp } from "./app.ts";
 const pool = await connection().connect();
+const store = new SqlPayoutStore(pool);
 const app = makeApp(
-  new SqlStore(pool),
+  store,
   new LegacyClient(
     env("LEGACY_URL", "http://legacy:8080"),
     env("LEGACY_BRIDGE_KEY"),
@@ -14,6 +17,13 @@ const app = makeApp(
     sessionSecret: env("SESSION_SECRET"),
     demoPassword: env("DEMO_PASSWORD"),
     logger: true,
+    payouts: {
+      store,
+      bank: new BankClient(
+        env("BANK_URL", "http://bank:3100"),
+        env("BANK_KEY"),
+      ),
+    },
     origins: env(
       "CORS_ORIGINS",
       "http://localhost:8081,http://localhost:19006",

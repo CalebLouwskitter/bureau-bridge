@@ -2,9 +2,20 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import sql from "mssql";
 import type { ReconciliationRun } from "@bureau/contracts";
-import { connection, SqlStore, Conflict } from "../src/store.ts";
+import { BANK_DETAILS, SETTLEMENT_ACCOUNT } from "@bureau/contracts";
+import { connection, Conflict } from "../src/store.ts";
+import { SqlPayoutStore } from "../src/payout-store.ts";
+import { generateFile, importResponse, submitFile } from "../src/payouts.ts";
+import { BankSimulator, MemoryLedger } from "../src/bank-sim.ts";
+import {
+  buildResponse,
+  parseEft,
+  parseResponse,
+  sha256,
+  USER_CODE,
+} from "../src/eft.ts";
 const pool = await connection().connect(),
-  store = new SqlStore(pool);
+  store = new SqlPayoutStore(pool);
 const client = "TEST_" + randomUUID().slice(0, 8),
   key = randomUUID();
 let id: string | undefined;
@@ -133,10 +144,143 @@ try {
     (await store.latestReconciliation(client))!.findings[0].details,
     "Integration check",
   );
+  await store.syncAccounts(client, {
+    ...snapshot,
+    generation: "gen-v3",
+    sequence: 2,
+    balances: [
+      ...snapshot.balances,
+      {
+        account: SETTLEMENT_ACCOUNT,
+        amountMinor: 0,
+        currency: "ZAR",
+        kind: "SETTLEMENT",
+        state: "ACTIVE",
+      },
+    ],
+  });
+  assert.equal((await store.accounts(client)).length, 2);
+
+  // Payments hub: atomic instructions, one file per payout, one answer per file.
+  const payoutInput = {
+    sourceAccount: "EMP000000001",
+    targetAccount: SETTLEMENT_ACCOUNT,
+    amountMinor: 10000,
+    currency: "ZAR" as const,
+  };
+  const payoutKey = randomUUID();
+  const [p1, p1Again] = await Promise.all([
+    store.createPayout(client, payoutKey, payoutInput),
+    store.createPayout(client, payoutKey, payoutInput),
+  ]);
+  assert.equal(p1Again.id, p1.id);
+  assert.equal(p1.status, "AWAITING_DEBIT");
+  await assert.rejects(
+    () =>
+      store.createPayout(client, payoutKey, {
+        ...payoutInput,
+        amountMinor: 10001,
+      }),
+    Conflict,
+  );
+  const p2 = await store.createPayout(client, randomUUID(), {
+    ...payoutInput,
+    sourceAccount: "EMP000000002",
+  });
+  assert.equal(
+    await generateFile(store, client, randomUUID()),
+    undefined,
+    "A payout cannot be filed before its core debit posts",
+  );
+  await pool.request().input("client", sql.VarChar(30), client)
+    .query(`UPDATE dbo.Allocations SET Status='POSTED',PostingId=Id WHERE ClientId=@client AND TargetAccount='${SETTLEMENT_ACCOUNT}';
+      UPDATE o SET DueAt=NULL FROM dbo.Outbox o JOIN dbo.Allocations a ON a.Id=o.AllocationId WHERE a.ClientId=@client;`);
+  const fileKey = randomUUID();
+  const generated = await Promise.all([
+    generateFile(store, client, fileKey),
+    generateFile(store, client, fileKey),
+  ]);
+  assert.equal(generated[1]!.id, generated[0]!.id);
+  assert.deepEqual(
+    [
+      generated[0]!.itemCount,
+      generated[0]!.amountTotal,
+      generated[0]!.generation,
+    ],
+    [2, 20000, 1],
+  );
+  assert.equal(
+    await generateFile(store, client, randomUUID()),
+    undefined,
+    "A payout belongs to at most one file",
+  );
+  const stored = (await store.payoutFile(client, generated[0]!.id))!;
+  assert.equal(sha256(stored.content), stored.sha256);
+  assert.equal(parseEft(stored.content).items.length, 2);
+  const two = BANK_DETAILS.EMP000000002;
+  const bank = new BankSimulator(
+    new MemoryLedger(),
+    new Set([`${two.branch}/${two.account}`]),
+  );
+  const answered = await submitFile(store, bank, client, stored.id);
+  assert.deepEqual(
+    [answered.paid, answered.returned, answered.duplicate],
+    [1, 1, false],
+  );
+  assert.equal(
+    (await submitFile(store, bank, client, stored.id)).duplicate,
+    true,
+    "Reprocessing the bank answer must not create a second credit",
+  );
+  const listed = await store.listPayouts(client);
+  assert.equal(listed.find((p) => p.id === p1.id)!.status, "PAID");
+  const returned = listed.find((p) => p.id === p2.id)!;
+  assert.equal(returned.status, "RETURN_PENDING");
+  const credit = (await store.get(returned.returnAllocationId!))!;
+  assert.deepEqual(
+    [credit.sourceAccount, credit.targetAccount, credit.amountMinor],
+    [SETTLEMENT_ACCOUNT, "EMP000000002", 10000],
+  );
+  const original = parseResponse(
+    (await bank.inquire(USER_CODE, stored.generation))!,
+  );
+  await assert.rejects(
+    () =>
+      importResponse(
+        store,
+        client,
+        buildResponse({
+          ...original,
+          results: original.results.map((r) => ({
+            ...r,
+            outcome: "PAID",
+            code: null,
+          })),
+        }),
+      ),
+    Conflict,
+  );
+  const employeeView = await store.list(client, "EMP000000002");
+  assert.deepEqual(
+    new Set(employeeView.map((a) => a.id)),
+    new Set([p2.id, credit.id]),
+  );
+  const scanned = await store.scanPayouts(client);
+  assert.deepEqual(
+    [scanned.payouts.length, scanned.files.length, scanned.truncated],
+    [2, 1, false],
+  );
   console.log(
-    "PASS SQL atomic create, replay/conflict, lease fencing, immutable final status, stale account snapshot rejection, and persisted reconciliation.",
+    "PASS SQL atomic create, replay/conflict, lease fencing, immutable final status, stale account snapshot rejection, persisted reconciliation, idempotent payout instructions, one-file-per-payout generation, and once-only bank response processing.",
   );
 } finally {
+  await pool.request().input("client", sql.VarChar(30), client)
+    .query(`DELETE dbo.PayoutInstructions WHERE ClientId=@client;
+    DELETE b FROM dbo.BankResponses b JOIN dbo.PayoutFiles f ON f.Id=b.PayoutFileId WHERE f.ClientId=@client;
+    DELETE dbo.PayoutFiles WHERE ClientId=@client;
+    DELETE e FROM dbo.AllocationEvents e JOIN dbo.Allocations a ON a.Id=e.AllocationId WHERE a.ClientId=@client;
+    DELETE o FROM dbo.Outbox o JOIN dbo.Allocations a ON a.Id=o.AllocationId WHERE a.ClientId=@client;
+    DELETE dbo.Allocations WHERE ClientId=@client;`);
   if (id)
     await pool
       .request()

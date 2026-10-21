@@ -1,10 +1,11 @@
-import { connection, SqlStore } from "./store.ts";
+import { connection } from "./store.ts";
+import { SqlPayoutStore } from "./payout-store.ts";
 import { env } from "./config.ts";
 import { LegacyClient } from "./legacy.ts";
 import { tick } from "./worker.ts";
 import { reconcile } from "./reconciliation.ts";
 const pool = await connection().connect();
-const store = new SqlStore(pool),
+const store = new SqlPayoutStore(pool),
   legacy = new LegacyClient(
     env("LEGACY_URL", "http://legacy:8080"),
     env("LEGACY_BRIDGE_KEY"),
@@ -34,7 +35,7 @@ while (running) {
     }
     if (Date.now() >= nextReconciliation) {
       nextReconciliation = Date.now() + reconcileEvery;
-      await reconcile(store, legacy, "INSURER_DEMO");
+      await reconcile(store, legacy, "INSURER_DEMO", store);
     }
     if (await tick(store, legacy)) continue;
   } catch (error) {

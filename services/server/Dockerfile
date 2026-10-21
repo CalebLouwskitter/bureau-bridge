@@ -8,6 +8,8 @@ RUN npm ci --workspace @bureau/server --workspace @bureau/contracts --include-wo
 COPY packages/ packages/
 COPY services/server/ services/server/
 COPY database/modern/ database/modern/
+# A new named volume copies this ownership, so the demo bank can keep state.
+RUN mkdir -p /data/bank && chown node:node /data/bank
 USER node
 EXPOSE 3000
 CMD ["npm", "run", "api"]

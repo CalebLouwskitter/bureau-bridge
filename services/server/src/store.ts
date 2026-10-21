@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import sql from "mssql";
 import type {
   Allocation,
@@ -9,6 +9,13 @@ import type {
   ReconciliationRun,
 } from "@bureau/contracts";
 import { env } from "./config.ts";
+import { fingerprint as payloadFingerprint } from "./ids.ts";
+
+export interface BankDetails {
+  branch: string;
+  account: string;
+  holder: string;
+}
 
 export class Conflict extends Error {}
 export interface Job {
@@ -63,7 +70,7 @@ export function connection(
     requestTimeout: 15000,
   });
 }
-function map(row: any): Allocation {
+export function map(row: any): Allocation {
   return {
     id: row.Id,
     clientId: row.ClientId,
@@ -80,10 +87,15 @@ function map(row: any): Allocation {
 }
 export class SqlStore implements Store {
   constructor(readonly pool: sql.ConnectionPool) {}
-  async create(clientId: string, key: string, input: AllocationInput) {
-    const fingerprint = createHash("sha256")
-      .update(JSON.stringify(input))
-      .digest("hex");
+  // With bank details, the payout instruction is created in the same
+  // transaction as its core debit allocation and outbox row.
+  async create(
+    clientId: string,
+    key: string,
+    input: AllocationInput,
+    bank?: BankDetails,
+  ) {
+    const fingerprint = payloadFingerprint(input);
     const tx = new sql.Transaction(this.pool);
     await tx.begin();
     const id = randomUUID();
@@ -95,12 +107,18 @@ export class SqlStore implements Store {
         .input("hash", sql.Char(64), fingerprint)
         .input("source", sql.Char(12), input.sourceAccount)
         .input("target", sql.Char(12), input.targetAccount)
-        .input("amount", sql.BigInt, input.amountMinor).query(`
+        .input("amount", sql.BigInt, input.amountMinor)
+        .input("branch", sql.Char(6), bank?.branch ?? null)
+        .input("bankAccount", sql.Char(11), bank?.account ?? null)
+        .input("holder", sql.VarChar(14), bank?.holder ?? null).query(`
           SET XACT_ABORT ON;
           INSERT dbo.Allocations (Id,ClientId,IdempotencyKey,Fingerprint,SourceAccount,TargetAccount,AmountMinor,Currency,Status)
           VALUES (@id,@client,@key,@hash,@source,@target,@amount,'ZAR','QUEUED');
           INSERT dbo.Outbox (AllocationId) VALUES (@id);
-          INSERT dbo.AllocationEvents (AllocationId,Status) VALUES (@id,'QUEUED');`);
+          INSERT dbo.AllocationEvents (AllocationId,Status) VALUES (@id,'QUEUED');
+          IF @branch IS NOT NULL
+            INSERT dbo.PayoutInstructions (Id,ClientId,EmployeeAccount,AmountMinor,Branch,BankAccount,Holder)
+            VALUES (@id,@client,@source,@amount,@branch,@bankAccount,@holder);`);
       await tx.commit();
       return (await this.get(id))!;
     } catch (error: any) {
@@ -124,7 +142,7 @@ export class SqlStore implements Store {
       .input("client", sql.VarChar(30), clientId)
       .input("employee", sql.Char(12), employee ?? null)
       .query(
-        "SELECT TOP (100) * FROM dbo.Allocations WHERE ClientId=@client AND (@employee IS NULL OR TargetAccount=@employee) ORDER BY CreatedAt DESC",
+        "SELECT TOP (100) * FROM dbo.Allocations WHERE ClientId=@client AND (@employee IS NULL OR TargetAccount=@employee OR SourceAccount=@employee) ORDER BY CreatedAt DESC",
       );
     return result.recordset.map(map);
   }

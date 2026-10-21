@@ -97,10 +97,13 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?Run setup}
       DEMO_PASSWORD: ${DEMO_PASSWORD:?Run setup}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8081,http://localhost:19006}
+      BANK_URL: http://bank:3100
+      BANK_KEY: ${BANK_KEY:?Run setup}
     ports: ["${API_BIND:-127.0.0.1}:3000:3000"]
     depends_on:
       sql-init: { condition: service_completed_successfully }
       legacy: { condition: service_healthy }
+      bank: { condition: service_healthy }
     healthcheck:
       test:
         [
@@ -108,6 +111,28 @@ services:
           node,
           -e,
           'fetch("http://localhost:3000/health").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  # A stand-in for the receiving bank, with its own state volume.
+  bank:
+    build: { context: ., dockerfile: services/server/Dockerfile }
+    command: [npm, run, bank, --workspace, "@bureau/server"]
+    environment:
+      BANK_KEY: ${BANK_KEY:?Run setup}
+      BANK_STATE: /data/bank/submissions.json
+      BANK_CLOSED_ACCOUNTS: ${BANK_CLOSED_ACCOUNTS:-990002/20000000025}
+    volumes: [bank_files:/data/bank]
+    ports: ["127.0.0.1:3100:3100"]
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          'fetch("http://localhost:3100/health").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))',
         ]
       interval: 5s
       timeout: 5s
@@ -129,3 +154,4 @@ volumes:
   modern_db:
   core_files:
   exchange_files:
+  bank_files:
