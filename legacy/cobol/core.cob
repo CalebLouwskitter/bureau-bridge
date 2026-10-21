@@ -55,6 +55,8 @@ working-storage section.
 01 target-before pic 9(12).
 01 decision pic x(8).
 01 reason-code pic x(20).
+01 transfer-kind pic x(10).
+01 route-ok pic x.
 procedure division.
 main.
     accept run-mode from environment "CORE_MODE"
@@ -74,12 +76,16 @@ main.
         move "EMP000000003" to account-id
         move "e" to account-kind
         write account-row
+        move "BNK000000001" to account-id
+        move "S" to account-kind
+        write account-row
         close accounts journal
     else
         open i-o accounts journal
         perform check-files
         if run-mode = "UPGRADE"
             perform ensure-suspended-account
+            perform ensure-settlement-account
         else
         open output results
         if output-fs not = "00" stop run returning 70 end-if
@@ -143,6 +149,18 @@ ensure-suspended-account.
         when "00" continue
         when other stop run returning 70
     end-evaluate.
+ensure-settlement-account.
+    move "BNK000000001" to account-id
+    read accounts
+    evaluate account-fs
+        when "23"
+            move 0 to account-cents
+            move "S" to account-kind
+            write account-row
+            if account-fs not = "00" stop run returning 70 end-if
+        when "00" continue
+        when other stop run returning 70
+    end-evaluate.
 process-row.
     move input-ref to journal-ref
     read journal
@@ -171,9 +189,13 @@ process-row.
     move journal-row to output-row
     write output-row
     if output-fs not = "00" stop run returning 70 end-if.
+*> The source account type selects the route: client to employee is an
+*> allocation, employee to settlement is a bank payout, and settlement to
+*> employee credits back a payout the bank returned.
 new-transfer.
     move "DECLINED" to decision
     move "INVALID_REQUEST" to reason-code
+    move spaces to transfer-kind
     if input-cents is numeric and input-cents > 0
        and input-currency = "ZAR" and input-source not = input-target
         move input-source to account-id
@@ -181,12 +203,19 @@ new-transfer.
         evaluate account-fs
             when "23" move "SOURCE_UNKNOWN" to reason-code
             when "00"
+                move account-cents to source-before
                 evaluate account-kind
+                    when "C" move "ALLOCATION" to transfer-kind
+                    when "E" move "PAYOUT" to transfer-kind
+                    when "S" move "RETURN" to transfer-kind
                     when "c" move "SOURCE_SUSPENDED" to reason-code
-                    when "C" move account-cents to source-before
-                             perform check-target
-                    when other move "SOURCE_NOT_CLIENT" to reason-code
+                    when "e" move "SOURCE_SUSPENDED" to reason-code
+                    when "s" move "SOURCE_SUSPENDED" to reason-code
+                    when other move "ROUTE_NOT_ALLOWED" to reason-code
                 end-evaluate
+                if transfer-kind not = spaces
+                    perform check-target
+                end-if
             when other stop run returning 70
         end-evaluate
     end-if
@@ -203,14 +232,15 @@ check-target.
     evaluate account-fs
         when "23" move "TARGET_UNKNOWN" to reason-code
         when "00"
+            perform check-route
             evaluate true
-                when account-kind = "e"
+                when transfer-kind = "ALLOCATION" and account-kind = "e"
                     move "TARGET_SUSPENDED" to reason-code
-                when account-kind not = "E"
-                    move "TARGET_NOT_EMPLOYEE" to reason-code
+                when route-ok not = "Y"
+                    move "ROUTE_NOT_ALLOWED" to reason-code
                 when input-cents > source-before
                     move "INSUFFICIENT_FUNDS" to reason-code
-                when input-cents > 5000000
+                when input-cents > 5000000 and transfer-kind not = "RETURN"
                     move "PER_TRANSFER_LIMIT" to reason-code
                 when other
                     move account-cents to target-before
@@ -222,6 +252,19 @@ check-target.
             end-evaluate
         when other stop run returning 70
     end-evaluate.
+*> A return must credit the employee even if the payable was suspended after
+*> the payout left; the limit check above also exempts returns.
+check-route.
+    move "N" to route-ok
+    if transfer-kind = "ALLOCATION" and account-kind = "E"
+        move "Y" to route-ok
+    end-if
+    if transfer-kind = "PAYOUT" and account-kind = "S"
+        move "Y" to route-ok
+    end-if
+    if transfer-kind = "RETURN" and (account-kind = "E" or account-kind = "e")
+        move "Y" to route-ok
+    end-if.
 post-transfer.
     move input-source to account-id
     read accounts

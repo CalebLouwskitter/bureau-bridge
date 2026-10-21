@@ -24,14 +24,19 @@ def sync_dir(path):
         os.close(fd)
 
 
+KINDS = {"C": "CLIENT", "E": "EMPLOYEE", "S": "SETTLEMENT"}
+# Version 2 added the suspended employee fixture; version 3 the bank settlement account.
+FORMAT_VERSION = 3
+
+
 def read_balances(path):
     items = []
     for line in path.read_text().splitlines():
         kind = line[24:25]
-        if len(line) != 25 or kind not in ("C", "E", "c", "e"):
+        if len(line) != 25 or kind.upper() not in KINDS:
             raise ValueError("Unrecognized account type/state")
         items.append({"account": line[:12], "amountMinor": int(line[12:24]),
-            "currency": "ZAR", "kind": "CLIENT" if kind.upper() == "C" else "EMPLOYEE",
+            "currency": "ZAR", "kind": KINDS[kind.upper()],
             "state": "ACTIVE" if kind.isupper() else "SUSPENDED"})
     if sum(item["amountMinor"] for item in items) != 10000000:
         raise ValueError("Seeded demo total must remain conserved")
@@ -45,7 +50,7 @@ def execute(root, mode, source=None, fault=None):
         current = root / "current"
         if not current.exists():
             build(root, "SEED")
-        elif json.loads((current / "manifest.json").read_text()).get("formatVersion",1) < 2:
+        elif json.loads((current / "manifest.json").read_text()).get("formatVersion",1) < FORMAT_VERSION:
             build(root,"UPGRADE")
         if mode == "SEED":
             return {"generation": str(current.resolve())}
@@ -107,7 +112,7 @@ def build(root, mode, source=None, fault=None):
     observed_at = datetime.now(timezone.utc).isoformat()
     sequence = 0 if mode == "SEED" else json.loads((root / "current/manifest.json").read_text()).get("sequence",0)+1
     (generation / "manifest.json").write_text(json.dumps({"mode": mode,
-        "formatVersion": 2,
+        "formatVersion": FORMAT_VERSION,
         "observedAt": observed_at,
         "sequence": sequence,
         "inputSha256": hashlib.sha256((generation / "input.dat").read_bytes()).hexdigest()

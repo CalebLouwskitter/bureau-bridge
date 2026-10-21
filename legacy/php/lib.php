@@ -32,8 +32,12 @@ function allocation(array $data): array {
     $ref = $data['reference'] ?? '';
     if (!is_string($ref) || !preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/D', $ref))
         throw new InvalidArgumentException('reference must be a lowercase UUID');
-    if (($data['sourceAccount'] ?? '') !== 'INS000000001' ||
-        !in_array($data['targetAccount'] ?? '', ['EMP000000001','EMP000000002','EMP000000003'], true))
+    // Allocations, bank payouts into settlement, and credits for returned payouts.
+    $routes = ['INS000000001'=>['EMP000000001','EMP000000002','EMP000000003'],
+        'EMP000000001'=>['BNK000000001'], 'EMP000000002'=>['BNK000000001'],
+        'BNK000000001'=>['EMP000000001','EMP000000002']];
+    $source = $data['sourceAccount'] ?? ''; $target = $data['targetAccount'] ?? '';
+    if (!is_string($source) || !is_string($target) || !in_array($target, $routes[$source] ?? [], true))
         throw new InvalidArgumentException('Unsupported demo account');
     $amount = $data['amountMinor'] ?? null;
     if (!is_int($amount) || $amount < 1 || $amount > 999999999999 || ($data['currency'] ?? '') !== 'ZAR')
