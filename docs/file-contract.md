@@ -36,3 +36,53 @@ The 139-byte result row contains reference, payload, outcome, reason, and postin
 The journal stores terminal declines as well as successful postings. Reusing a known reference with changed data produces `CONFLICT`; the original journal entry stays intact. A decline therefore requires a genuinely new business request if the operator later changes the amount.
 
 Input size and format are validated before COBOL runs. Core file errors leave the previous generation authoritative. Failed private generations may remain for inspection; automated pruning is deferred. The fixed record layout is an intentionally small mock interface, not an IBM mainframe protocol emulator.
+
+## Routes and the settlement account (core format v3)
+
+The core selects a route from the source account's type/state marker. `S` marks the active bank settlement account `BNK000000001`; `s` would mark it suspended.
+
+| Source marker | Allowed target | Route | Decline reasons specific to the route |
+| --- | --- | --- | --- |
+| `C` | `E` | Allocation | `TARGET_SUSPENDED` for an `e` target |
+| `E` | `S` | Payout | `INSUFFICIENT_FUNDS`, `PER_TRANSFER_LIMIT` |
+| `S` | `E` or `e` | Return credit | `INSUFFICIENT_FUNDS` if settlement holds less |
+| `c`, `e`, `s` | — | — | `SOURCE_SUSPENDED` |
+
+Any other pairing declines with `ROUTE_NOT_ALLOWED`. The request and result layouts are unchanged. PHP intake accepts only the demo routes. The first access to a format v2 generation adds the zero-value settlement account in a private copy, preserving balances and journal history.
+
+## BB-EFT v1 payout file
+
+The payments hub writes this file; the demo bank reads it. It is a simplified fixed-width credit-transfer file with the header/detail/trailer shape of bank EFT submissions, **not** a real bank or clearing-house format. Every record is 80 ASCII bytes plus LF. Details are sorted by reference, so the same payouts always produce the same bytes.
+
+| Record | Field | Start | Width | Example |
+| --- | --- | --: | --: | --- |
+| Header `H` | User code | 2 | 8 | `BUREAU01` |
+| | Generation | 10 | 6 | `000001` |
+| | Action date | 16 | 8 | `20261021` |
+| | File ID | 24 | 36 | Lowercase UUID |
+| Detail `D` | Branch code | 2 | 6 | `990001` (fictional) |
+| | Account number | 8 | 11 | `10000000017` |
+| | Amount in cents | 19 | 12 | `000000010000` |
+| | Payment reference | 31 | 36 | Payout instruction / core debit UUID |
+| | Beneficiary name | 67 | 14 | `EMPLOYEE ONE` |
+| Trailer `T` | Record count | 2 | 6 | `000002` |
+| | Amount total | 8 | 14 | `00000000040000` |
+| | Account hash total | 22 | 18 | Sum of account numbers modulo 10^18 |
+
+The amount total catches a changed amount. The hash total catches a changed destination account even when amounts still add up. The hub parses its own output before storing it and keeps the bytes with a SHA-256.
+
+## Bank response
+
+| Record | Field | Start | Width | Values |
+| --- | --- | --: | --: | --- |
+| Header `H` | File ID | 2 | 36 | The submitted file |
+| | Generation | 38 | 6 | The submitted generation |
+| | Status | 44 | 8 | `ACCEPTED`, `REJECTED` |
+| | Reason | 52 | 20 | e.g. `DUPLICATE_GENERATION`, `TRAILER_AMOUNT` |
+| Result `R` | Payment reference | 2 | 36 | One line per detail |
+| | Outcome | 38 | 8 | `PAID`, `RETURNED` |
+| | Return code | 46 | 2 | `AC` account closed, `NA` no such account, `AF` account frozen |
+| Trailer `T` | Result count | 2 | 6 | |
+| | Returned count | 8 | 6 | |
+
+A rejected file has no result lines; its payouts are released for a new file with a new generation. Return codes are fictional. Real banks report returns separately over the following days; this lab returns them in the single response.

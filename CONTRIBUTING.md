@@ -8,6 +8,7 @@ Start with the [README](README.md), [development guide](docs/development.md), an
 - Keep ledger mutations in the COBOL core. Modern account values are read projections with source metadata.
 - Preserve request references across retries and recovery. Reject a reference reused with different data.
 - Treat `POSTED` and `DECLINED` as final. A timeout or pending import needs verification.
+- Never resend a payout file without first asking the bank about its generation. A payout belongs to at most one file.
 - Keep the fixed-width layout and its documentation together when changing the boundary.
 - Keep generated credentials, data volumes, build output, and signing files out of commits.
 
@@ -28,4 +29,4 @@ The [validation record](docs/validation.md) explains the distinction between iso
 
 Explain the triggering scenario, the resulting behavior, and the evidence for it. Keep schema changes idempotent and preserve existing demo volumes when practical. The v0.1 core upgrade fixture is available for compatibility checks.
 
-Fictional data and local demo identities are deliberate. Employer catalogs, external payouts, production identity, and deployment are separate project slices.
+Fictional data and local demo identities are deliberate. Employer catalogs, production identity, real bank formats and transport, and deployment are separate project slices.
