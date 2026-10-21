@@ -1,5 +1,7 @@
 # FinTech Legacy Bridge — infrastructure draft v0.7
 
+> **Update, October 2026:** the external payout slice described below as future work is now implemented: core settlement routes, BB-EFT v1 files, a demo bank and return credits. See [ADR 0003](adr/0003-bank-payouts.md). The rest of this document is the original design record.
+
 **Status:** the second requirements review corrected missing balance views, reconciliation/reporting, and recovery protections in BureauBridge v0.2. TypeScript, core recovery/upgrade, real PHP/MariaDB/COBOL HTTP integration, and Expo platform bundle checks pass. SQL Server runtime, complete Docker startup, and native device execution remain unverified. All identities, accounts, money, and institutions are fictional.
 
 ## The situation

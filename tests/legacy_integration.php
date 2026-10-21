@@ -11,7 +11,11 @@ catch (DomainException $e) { /* Expected conflict. */ }
 batch();
 check(lookup($first['reference'])['status']==='POSTED','Batch did not post');
 check(inquiry($first['reference'])['coreOutcome']==='POSTED','Inquiry lost committed outcome');
-echo "PASS intake, idempotent replay, conflicting payload and normal batch\n";
+foreach ([['EMP000000001','INS000000001'],['INS000000001','BNK000000001'],['EMP000000003','BNK000000001']] as [$source,$target]) {
+    try { intake([...sample(),'sourceAccount'=>$source,'targetAccount'=>$target]); throw new LogicException("Route $source to $target was accepted"); }
+    catch (InvalidArgumentException $e) { /* Expected route rejection. */ }
+}
+echo "PASS intake, idempotent replay, conflicting payload, route checks and normal batch\n";
 
 $second=sample();intake($second);
 try {batch(true);throw new LogicException('Fault was not injected');} catch(RuntimeException $e) {}

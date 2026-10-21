@@ -1,11 +1,17 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const env = join(root, ".env");
+const secret = () => `Bb1!${randomBytes(24).toString("hex")}`;
 if (!existsSync(env)) {
-  const secret = () => `Bb1!${randomBytes(24).toString("hex")}`;
   const keys = [
     "MSSQL_SA_PASSWORD",
     "MSSQL_PASSWORD",
@@ -15,6 +21,7 @@ if (!existsSync(env)) {
     "LEGACY_OPS_KEY",
     "SESSION_SECRET",
     "DEMO_PASSWORD",
+    "BANK_KEY",
   ];
   writeFileSync(
     env,
@@ -25,7 +32,23 @@ if (!existsSync(env)) {
   console.log(
     "Created .env with independent local credentials. Find DEMO_PASSWORD there to sign in.",
   );
-} else console.log("Existing .env preserved.");
+} else {
+  // Keep existing values; add secrets introduced by later slices.
+  const present = readFileSync(env, "utf8");
+  const missing = ["BANK_KEY"].filter(
+    (key) => !new RegExp(`^${key}=`, "m").test(present),
+  );
+  const separator = present.endsWith("\n") ? "" : "\n";
+  appendFileSync(
+    env,
+    separator + missing.map((key) => `${key}=${secret()}\n`).join(""),
+  );
+  console.log(
+    missing.length
+      ? `Existing .env preserved; added ${missing.join(", ")}.`
+      : "Existing .env preserved.",
+  );
+}
 const mobile = join(root, "apps/mobile/.env");
 mkdirSync(join(root, "apps/mobile"), { recursive: true });
 if (!existsSync(mobile))

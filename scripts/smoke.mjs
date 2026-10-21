@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 const base = process.env.API_URL ?? "http://localhost:3000";
 async function login(username) {
@@ -97,6 +97,142 @@ for (let i = 0; i < 45; i++) {
 }
 assert.equal(accounts.length, 1);
 assert.equal(accounts[0].account, "EMP000000001");
+// Payout leg: debit payables into settlement, file them, lose the bank's
+// answer once, recover it by inquiry, and credit back the returned item.
+const bankBase = process.env.BANK_URL ?? "http://localhost:3100";
+const call = (path, user, method = "GET", key, payload) =>
+  fetch(base + path, {
+    method,
+    headers: {
+      Authorization: `Bearer ${user}`,
+      ...(payload === undefined ? {} : { "Content-Type": "application/json" }),
+      ...(key ? { "Idempotency-Key": key } : {}),
+    },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  });
+const funding = await (
+  await submit(randomUUID(), {
+    ...body,
+    targetAccount: "EMP000000002",
+    amountMinor: 30000,
+  })
+).json();
+await wait(funding.id, ["AWAITING_BATCH"]);
+batch();
+await wait(funding.id, ["POSTED"]);
+const payoutKey = randomUUID();
+const payOne = await call("/payouts", token, "POST", payoutKey, {
+  employeeAccount: "EMP000000001",
+  amountMinor: 10000,
+});
+assert.equal(payOne.status, 202);
+const p1 = await payOne.json();
+assert.equal(
+  (
+    await (
+      await call("/payouts", token, "POST", payoutKey, {
+        employeeAccount: "EMP000000001",
+        amountMinor: 10000,
+      })
+    ).json()
+  ).id,
+  p1.id,
+);
+const p2 = await (
+  await call("/payouts", token, "POST", randomUUID(), {
+    employeeAccount: "EMP000000002",
+    amountMinor: 30000,
+  })
+).json();
+await wait(p1.id, ["AWAITING_BATCH"]);
+await wait(p2.id, ["AWAITING_BATCH"]);
+assert.equal(
+  (await call("/payout-files", ops, "POST", randomUUID(), {})).status,
+  409,
+  "Payouts cannot be filed before the core debit posts",
+);
+batch();
+await wait(p1.id, ["POSTED"]);
+await wait(p2.id, ["POSTED"]);
+const fileKey = randomUUID();
+const generated = await call("/payout-files", ops, "POST", fileKey, {});
+assert.equal(generated.status, 201);
+const file = await generated.json();
+assert.equal(file.itemCount, 2);
+assert.equal(
+  (await (await call("/payout-files", ops, "POST", fileKey, {})).json()).id,
+  file.id,
+);
+assert.equal(
+  (await call("/payout-files", ops, "POST", randomUUID(), {})).status,
+  409,
+);
+const eft = await call(`/payout-files/${file.id}/eft.txt`, ops);
+const eftText = await eft.text();
+assert.equal(
+  createHash("sha256").update(eftText).digest("hex"),
+  eft.headers.get("x-content-sha256"),
+);
+const bankHeaders = {
+  Authorization: `Bearer ${process.env.BANK_KEY}`,
+  "Content-Type": "application/json",
+};
+assert.equal(
+  (
+    await fetch(bankBase + "/faults", {
+      method: "POST",
+      headers: bankHeaders,
+      body: JSON.stringify({ dropNextResponse: true }),
+    })
+  ).status,
+  200,
+);
+assert.equal(
+  (await call(`/payout-files/${file.id}/submit`, ops, "POST", undefined, {}))
+    .status,
+  502,
+);
+assert.equal(
+  (await (await call("/payout-files", ops)).json()).files.find(
+    (f) => f.id === file.id,
+  ).status,
+  "SUBMISSION_UNKNOWN",
+);
+const answered = await (
+  await call(`/payout-files/${file.id}/submit`, ops, "POST", undefined, {})
+).json();
+assert.deepEqual(
+  [answered.paid, answered.returned, answered.duplicate],
+  [1, 1, false],
+);
+const bankResponse = await (
+  await fetch(`${bankBase}/files/BUREAU01/${file.generation}/response`, {
+    headers: bankHeaders,
+  })
+).text();
+const replayed = await fetch(base + "/bank-responses", {
+  method: "POST",
+  headers: { Authorization: `Bearer ${ops}`, "Content-Type": "text/plain" },
+  body: bankResponse,
+});
+assert.equal((await replayed.json()).duplicate, true);
+const payoutsNow = (await (await call("/payouts", ops)).json()).payouts;
+assert.equal(payoutsNow.find((p) => p.id === p1.id).status, "PAID");
+const returned = payoutsNow.find((p) => p.id === p2.id);
+assert.equal(returned.status, "RETURN_PENDING");
+assert.equal(returned.returnCode, "AC");
+await wait(returned.returnAllocationId, ["AWAITING_BATCH"]);
+batch();
+await wait(returned.returnAllocationId, ["POSTED"]);
+assert.equal(
+  (await (await call("/payouts", ops)).json()).payouts.find(
+    (p) => p.id === p2.id,
+  ).status,
+  "RETURNED",
+);
+const ownPayouts = (await (await call("/payouts", employeeToken)).json())
+  .payouts;
+assert.ok(ownPayouts.every((p) => p.employeeAccount === "EMP000000001"));
 const report = await fetch(base + "/reconciliation", {
   method: "POST",
   headers: {
@@ -108,7 +244,15 @@ const report = await fetch(base + "/reconciliation", {
 assert.equal(report.status, 200);
 const run = (await report.json()).run;
 assert.equal(run.truncated, false);
-assert.ok(!run.findings.some((f) => f.severity === "HIGH"));
+assert.deepEqual(
+  run.findings.filter((f) => f.severity === "HIGH"),
+  [],
+);
+assert.match(
+  run.findings.find((f) => f.code === "SETTLEMENT_SUMMARY").details,
+  // Everything left in settlement was paid; the returned item was credited.
+  /^Settlement (R[\d.]+): paid by the bank \1, in files awaiting a response R0\.00, debited awaiting a file R0\.00, returned awaiting credit R0\.00\.$/,
+);
 const csv = await fetch(base + "/reconciliation/report.csv", {
   headers: { Authorization: `Bearer ${ops}` },
 });
@@ -123,5 +267,5 @@ assert.equal(
   403,
 );
 console.log(
-  "PASS: intake/replay/conflict, posting and lost-result recovery, suspended decline, private account projection, reconciliation and CSV report.",
+  "PASS: intake/replay/conflict, posting and lost-result recovery, suspended decline, private account projection, payout file generation, lost bank response recovery, bank return credit, settlement reconciliation and CSV report.",
 );

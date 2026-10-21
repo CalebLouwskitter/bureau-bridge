@@ -1,5 +1,6 @@
 import {
   EMPLOYEE_ACCOUNTS,
+  SETTLEMENT_ACCOUNT,
   SOURCE_ACCOUNT,
   type Status,
 } from "@bureau/contracts";
@@ -16,6 +17,7 @@ export const statusLabels: Record<Status, string> = {
 
 export function accountName(account: string) {
   if (account === SOURCE_ACCOUNT) return "Employer prefund";
+  if (account === SETTLEMENT_ACCOUNT) return "Bank payout settlement";
   const index = EMPLOYEE_ACCOUNTS.findIndex((id) => id === account);
   return index < 0 ? account : `Employee ${index + 1}`;
 }

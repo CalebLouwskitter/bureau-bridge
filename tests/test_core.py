@@ -35,9 +35,9 @@ class CoreRecoveryTest(unittest.TestCase):
         self.temp.cleanup()
 
     def run_core(self, reference, amount=25000, mode="POST", fault=None,
-                 target="EMP000000001", currency="ZAR"):
+                 target="EMP000000001", currency="ZAR", source="INS000000001"):
         path = self.directory / (uuid.uuid4().hex + ".dat")
-        path.write_text(f"{reference}INS000000001{target}{amount:012d}{currency}\n")
+        path.write_text(f"{reference}{source}{target}{amount:012d}{currency}\n")
         command = ["python3", str(ROOT / "legacy/core-runner.py"), mode, str(path)]
         if fault:
             command.extend(["--fault", fault])
@@ -64,7 +64,8 @@ class CoreRecoveryTest(unittest.TestCase):
         ref = str(uuid.uuid4())
         self.run_core(ref, fault="before-commit")
         self.assertEqual(self.run_core(ref, mode="QUERY")["records"][0]["status"], "NOTFOUND")
-        self.assertEqual(self.run_core(ref)["balances"][0]["amountMinor"], 25000)
+        balances = {a["account"]: a["amountMinor"] for a in self.run_core(ref)["balances"]}
+        self.assertEqual(balances["EMP000000001"], 25000)
 
     def test_lost_response_after_commit_does_not_double_debit(self):
         ref = str(uuid.uuid4())
@@ -83,6 +84,39 @@ class CoreRecoveryTest(unittest.TestCase):
             (10000001, "EMP000000001", "ZAR", "INSUFFICIENT_FUNDS")]:
             with self.subTest(reason=reason):
                 result = self.run_core(str(uuid.uuid4()), amount, target=target, currency=currency)
+                self.assertEqual(result["records"][0]["reason"], reason)
+                self.assertEqual(sum(x["amountMinor"] for x in result["balances"]), 10000000)
+
+    def test_payout_and_return_move_value_through_settlement(self):
+        self.run_core(str(uuid.uuid4()), 25000)
+        payout = str(uuid.uuid4())
+        sent = self.run_core(payout, 10000, source="EMP000000001", target="BNK000000001")
+        self.assertEqual(sent["records"][0]["status"], "POSTED")
+        amounts = {a["account"]: a["amountMinor"] for a in sent["balances"]}
+        self.assertEqual((amounts["EMP000000001"], amounts["BNK000000001"]), (15000, 10000))
+        returned = str(uuid.uuid4())
+        for _ in range(2):  # A replayed returns file must not credit twice.
+            back = self.run_core(returned, 10000, source="BNK000000001", target="EMP000000001")
+            self.assertEqual(back["records"][0]["status"], "POSTED")
+        amounts = {a["account"]: a["amountMinor"] for a in back["balances"]}
+        self.assertEqual((amounts["EMP000000001"], amounts["BNK000000001"]), (25000, 0))
+        self.assertEqual(sum(amounts.values()), 10000000)
+        settlement = next(a for a in back["balances"] if a["account"] == "BNK000000001")
+        self.assertEqual((settlement["kind"], settlement["state"]), ("SETTLEMENT", "ACTIVE"))
+
+    def test_routes_and_payout_rules(self):
+        self.run_core(str(uuid.uuid4()), 25000)
+        for amount, source, target, reason in [
+            (25001, "EMP000000001", "BNK000000001", "INSUFFICIENT_FUNDS"),
+            (1, "EMP000000003", "BNK000000001", "SOURCE_SUSPENDED"),
+            (1, "EMP000000001", "EMP000000002", "ROUTE_NOT_ALLOWED"),
+            (1, "EMP000000001", "INS000000001", "ROUTE_NOT_ALLOWED"),
+            (1, "INS000000001", "BNK000000001", "ROUTE_NOT_ALLOWED"),
+            (1, "BNK000000001", "INS000000001", "ROUTE_NOT_ALLOWED"),
+            (1, "BNK000000001", "EMP000000001", "INSUFFICIENT_FUNDS")]:
+            with self.subTest(source=source, target=target, reason=reason):
+                result = self.run_core(str(uuid.uuid4()), amount, source=source, target=target)
+                self.assertEqual(result["records"][0]["status"], "DECLINED")
                 self.assertEqual(result["records"][0]["reason"], reason)
                 self.assertEqual(sum(x["amountMinor"] for x in result["balances"]), 10000000)
 
@@ -118,7 +152,7 @@ class CoreRecoveryTest(unittest.TestCase):
         (core / "current").symlink_to(old.name)
         snapshot=json.loads(subprocess.check_output(["python3",str(ROOT / "legacy/core-runner.py"),"SNAPSHOT"],env=self.env,text=True))
         amounts={a["account"]:a["amountMinor"] for a in snapshot["balances"]}
-        self.assertEqual(amounts,{"INS000000001":9975000,"EMP000000001":25000,"EMP000000002":0,"EMP000000003":0})
+        self.assertEqual(amounts,{"INS000000001":9975000,"EMP000000001":25000,"EMP000000002":0,"EMP000000003":0,"BNK000000001":0})
         self.assertGreater(snapshot["sequence"],0)
         ref="00000000-0000-4000-8000-000000000001"
         query=self.run_core(ref,mode="QUERY")

@@ -20,7 +20,8 @@
     "mobile": "npm start --workspace @bureau/mobile",
     "web": "npm run web --workspace @bureau/mobile",
     "smoke": "node --env-file=.env scripts/smoke.mjs",
-    "test:mobile:web": "node scripts/test-mobile-ui.mjs"
+    "test:mobile:web": "node scripts/test-mobile-ui.mjs",
+    "demo:payouts": "node --env-file=.env scripts/demo-payouts.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",

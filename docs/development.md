@@ -4,7 +4,7 @@
 
 A working foundation for modernizing a fictional South African payroll bureau: PHP operations, a real COBOL batch core, a TypeScript bridge, Microsoft SQL Server, and an Expo client.
 
-The bureau has been acquired by a fintech. An insurer is one of its employer clients. The first workflow allocates a client's prefunded balance to an employee payable balance. **Posted internally** means the internal ledger changed. External bank payout is a separate future workflow.
+The bureau has been acquired by a fintech. An insurer is one of its employer clients. The first workflow allocates a client's prefunded balance to an employee payable balance. **Posted internally** means the internal ledger changed. The payout leg then debits payables into a core settlement account, sends a BB-EFT v1 file to a demo bank, and credits back bank returns; see [the payout decision](adr/0003-bank-payouts.md).
 
 ## What is included
 
@@ -17,7 +17,8 @@ The bureau has been acquired by a fintech. An insurer is one of its employer cli
 | Modern backend        | TypeScript / Fastify API and separate worker                                                                                               |
 | Modern persistence    | SQL Server request history, transactional outbox, leased jobs, status events, account projections, and reconciliation runs/findings        |
 | Client                | Expo app for payroll, employee, and operations roles, with balances, history, recovery, reconciliation, and CSV report export/share        |
-| Local infrastructure  | Seven Docker Compose services with named volumes and health checks                                                                         |
+| Payout leg            | Payout instructions, idempotent EFT file generation, a separate demo bank service, keyed return credits, and settlement reconciliation     |
+| Local infrastructure  | Eight Docker Compose services, including the demo bank, with named volumes and health checks                                               |
 | Verification          | Core recovery tests, API/worker tests, legacy integration test, SQL integration test, full-stack smoke script, and GitHub Actions workflow |
 
 See [validation evidence](validation.md) for checks actually run, including the passed Docker/SQL Server CI scenario.
@@ -123,7 +124,7 @@ The COBOL program updates two account records and a journal record containing th
 
 The core runner assumes a local Linux filesystem on one machine with atomic rename and `fsync` semantics. Docker named volumes supply that model for this lab. This is a single-writer core; distributed writers and network filesystem deployment need another design. Generation pruning, backup/restore automation, and retention are not implemented.
 
-The initial account master contains R100,000 in `INS000000001`, zero in two active employee payable accounts, and zero in suspended `EMP000000003`. A request to the suspended account is declined by the core. There is no deposit/payout endpoint. The conservation check therefore expects 10,000,000 total cents. The sample per-allocation limit is R50,000. These are invented demo business rules.
+The initial account master contains R100,000 in `INS000000001`, zero in two active employee payable accounts, and zero in suspended `EMP000000003`, and zero in the bank settlement account `BNK000000001`. A request to the suspended account is declined by the core. There is no deposit endpoint; payouts move value into settlement rather than out of the ledger. The conservation check therefore expects 10,000,000 total cents. The sample per-allocation limit is R50,000. These are invented demo business rules.
 
 SQL Server holds process state only. It never becomes another writable balance ledger. The worker claims jobs with a time-limited lease; a replaced lease token cannot finalize a newer worker's job. Transient failures back off, then move to **Needs review** after six consecutive failures. A timeout never becomes **Posted internally**.
 
@@ -147,6 +148,13 @@ The PHP portal exports request and batch-control CSVs. Operations users can expo
 | GET    | `/reconciliation`            | Operations-only latest saved observation      |
 | POST   | `/reconciliation`            | Operations-only comparison and saved findings |
 | GET    | `/reconciliation/report.csv` | Operations-only latest CSV report             |
+| POST   | `/payouts`                   | Payroll/ops payout request with `Idempotency-Key`; body `{ employeeAccount, amountMinor }` |
+| GET    | `/payouts`                   | Role-filtered payout instructions and status  |
+| POST   | `/payout-files`              | Operations-only EFT file generation with `Idempotency-Key` |
+| GET    | `/payout-files`              | Operations-only file list                     |
+| GET    | `/payout-files/:id/eft.txt`  | Operations-only stored file bytes with a SHA-256 header |
+| POST   | `/payout-files/:id/submit`   | Operations-only ask-then-send to the demo bank, then response import |
+| POST   | `/bank-responses`            | Operations-only `text/plain` response import; repeats report `duplicate` |
 
 Except health and sign-in, send `Authorization: Bearer <session token>`. The shared allocation body is:
 

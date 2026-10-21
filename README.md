@@ -13,7 +13,7 @@ A financial systems portfolio project connecting PHP and a real COBOL core to Ty
 [![PHP](https://img.shields.io/badge/PHP-777BB4?style=flat-square&logo=php&logoColor=white)](legacy/php)
 [![Expo](https://img.shields.io/badge/Expo-000020?style=flat-square&logo=expo&logoColor=white)](apps/mobile)
 
-[Architecture](docs/architecture.md) · [Run the demo](#run-the-demo) · [Recovery walkthrough](#the-demo-to-try-first) · [Validation evidence](docs/validation.md)
+[Architecture](docs/architecture.md) · [Run the demo](#run-the-demo) · [Recovery walkthrough](#the-demo-to-try-first) · [EFT payouts](#pay-out-by-eft) · [Talking points](docs/talking-points.md) · [Validation evidence](docs/validation.md)
 
 </div>
 
@@ -21,7 +21,7 @@ A financial systems portfolio project connecting PHP and a real COBOL core to Ty
 
 A fictional South African payroll bureau has been acquired by a fintech. Its operators use a PHP portal, while a COBOL batch processor owns the internal ledger in indexed files. An insurer is the first employer client. The new product needs mobile access, clearer status, and reliable recovery while the existing core keeps running.
 
-BureauBridge allocates prefunded employer value to employee payable accounts in **ZAR cents**. The app calls this **Posted internally**; an external bank payout is a future workflow.
+BureauBridge allocates prefunded employer value to employee payable accounts in **ZAR cents**. The app calls this **Posted internally**. A separate payout leg then pays payables out by EFT file to a demo bank, handles bank returns, and reconciles the settlement account.
 
 The interesting failure happens between systems: COBOL commits an allocation, but its result never reaches PHP. The modern app sees an unresolved request. Recovery must find the original posting, preserve its reference, and restore the displayed outcome.
 
@@ -37,6 +37,8 @@ The interesting failure happens between systems: COBOL commits an allocation, bu
 | Explaining unresolved outcomes | Inquiry and verified resumption, final-status protection, and allocation history |
 | Finding discrepancies | Reconciliation of modern requests, PHP intake, core outcomes, batch controls, and journal-derived balances |
 | Serving different users | Payroll, employee, and operations views in an Expo app; role and account ownership checks in the API |
+| Paying out exactly once | Payout debits into a core settlement account, one file per payout under a lock, deterministic hash-checked EFT files, ask-before-resend bank submission |
+| Handling bank returns | Each bank response processed once per file; a return becomes one keyed core credit; a settlement break report explains every cent |
 
 ## Architecture
 
@@ -50,6 +52,7 @@ flowchart TD
   P -->|"Fixed-width batch"| C["COBOL core via Python runner"]
   C --> G["Indexed accounts and reference journal"]
   C -->|"Results and inquiries"| P
+  A -->|"EFT file, inquiry, response"| B["Demo bank"]
 ```
 
 Requests cross an asynchronous boundary. Intake is an acknowledgement; a core result establishes the financial outcome. The wrapper copies the current indexed files, invokes COBOL, checks results and balance conservation, syncs the generation, and atomically replaces the `current` symlink. A failure before publication retains the previous ledger. A failure after publication can be resolved from the journal.
@@ -123,6 +126,24 @@ The separate **Verify and resume** action checks the journal before requeueing a
 
 Try Employee 3 to see the core decline a **suspended account**. The seeded prefunded balance is **R100,000**, the per-allocation limit is **R50,000**, and the client stores an unfinished request before transmission so retries preserve its reference.
 
+## Pay out by EFT
+
+The second half of the story pays the posted payables out to employees' fictional bank accounts.
+
+1. Payroll requests a payout. The API creates a core **debit** from the employee payable into the bank settlement account `BNK000000001`, through the same outbox, PHP intake, batch and COBOL journal as every allocation.
+2. After the debit posts, operations generates a **BB-EFT v1 file**: a fixed-width header, details and trailer with a count, an amount total and an account-number hash total. Every debited, unfiled payout is claimed once, and replaying the request returns the same file.
+3. Submitting asks the demo bank for that file generation's response **before** sending. A lost response is recovered without a second send, and the bank answers identical bytes with its original response.
+4. The demo bank returns Employee 2 (account closed, code `AC`). The return becomes one keyed **credit** from settlement back to the payable, posted in the next batch. Re-importing the response changes nothing.
+5. Reconciliation explains every cent in settlement: paid by the bank, in files awaiting a response, debited awaiting a file, returned awaiting credit.
+
+Run it narrated, pausing between steps:
+
+```powershell
+npm run demo:payouts -- --step
+```
+
+[The payout decision](docs/adr/0003-bank-payouts.md) explains the design and trade-offs, and [the file contract](docs/file-contract.md#bb-eft-v1-payout-file) defines the formats. The [guided demo script](docs/demo-script.md) walks through both halves in about 10 minutes.
+
 ## Balances and operations
 
 The app includes balances with a core timestamp, an allocation register, status history, and an operations reconciliation view. The worker refreshes account projections every **30 seconds** and saves a comparison every **300 seconds**; both intervals are configurable. Legacy batches run at **08:00, 12:00, 16:00, and 23:00** in Johannesburg time, with operator-triggered runs using the same protocol.
@@ -133,19 +154,19 @@ The PHP portal exports request and batch-control CSVs. The modern operations vie
 
 ## Validation status
 
-These results combine the local second review with a [successful full GitHub CI run](https://github.com/CalebLouwskitter/bureau-bridge/actions/runs/36699107346). The CI badge links to the repository's current workflow status.
+These results combine the local second review with a [successful full GitHub CI run](https://github.com/CalebLouwskitter/bureau-bridge/actions/runs/36699107346). The EFT payout slice passed [its own full-stack CI run](https://github.com/CalebLouwskitter/bureau-bridge/actions/runs/39650190448). The CI badge links to the repository's current workflow status.
 
 | Validation | Evidence |
 | --- | --- |
 | TypeScript checks | API, worker, contracts, and Expo compile |
-| API / worker / reconciliation | **14 tests passed**, using a fake persistence boundary |
-| Real COBOL core | **7 tests passed**, including duplicate/conflicting references, suspension, publication faults, read-only audit, and preserved v0.1 indexed-file upgrades |
+| API / worker / reconciliation / payouts | **23 tests passed**, using a fake persistence boundary, including EFT trailer tampering, the bank simulator and lost-response recovery |
+| Real COBOL core | **9 tests passed**, including duplicate/conflicting references, suspension, publication faults, read-only audit, payout and return routes, and preserved v0.1 indexed-file upgrades |
 | Real PHP + MariaDB + COBOL | Posting, lost-result recovery, verified resumption, batch controls, and final outcome protection passed |
 | Real HTTP integration | TypeScript legacy client, authenticated reports, operator session/form token, and credential boundaries passed |
 | Expo | Android/iOS Hermes and web bundles exported; native HTTP/HTTPS config introspected |
 | Compose | Configuration validation passed |
-| Real SQL Server | Migrations, concurrent idempotent creation, exclusive/stale leases, final-status protection, account projection ordering, and persisted reconciliation passed in CI |
-| Docker / complete stack | Container build/startup, real legacy integration, and full-stack posting/recovery/reconciliation smoke passed in CI |
+| Real SQL Server | Migrations, concurrent idempotent creation, exclusive/stale leases, final-status protection, account projection ordering, persisted reconciliation, payout instructions, one-file-per-payout generation and once-only bank responses passed in CI |
+| Docker / complete stack | Container build/startup, real legacy integration, and full-stack posting, recovery, payout, lost bank response, return and reconciliation smoke passed in CI |
 | Remaining device gate | Native Android/iOS binaries, device networking, UI interactions, and native sharing still need build and device checks |
 
 [The full evidence](docs/validation.md) distinguishes compilation and isolated tests from actual runtime checks. [The requirements review](docs/second-review.md) records the fixes and remaining scope. JavaScript bundles exported successfully; signed device binaries still need build and device validation.
@@ -175,10 +196,12 @@ The [CI workflow](.github/workflows/validate.yml) includes real legacy integrati
 | [`legacy/core-runner.py`](legacy/core-runner.py) | Generation publication, inquiry, audit, and upgrades |
 | [`database`](database) | MariaDB and Microsoft SQL Server schema scripts |
 | [`docs/development.md`](docs/development.md) | Detailed setup, API routes, upgrades, shutdown, and the PHP refresher |
-| [`docs/file-contract.md`](docs/file-contract.md) | The 75-byte request and 139-byte result boundary |
+| [`docs/file-contract.md`](docs/file-contract.md) | The 75-byte request and 139-byte result boundary, core routes, and the EFT and bank response files |
+| [`docs/talking-points.md`](docs/talking-points.md) | 2-minute pitch, hardest problems and trade-offs, production gaps, likely questions |
+| [`docs/demo-script.md`](docs/demo-script.md) | A guided 10-minute demo |
 
 ## Next slices
 
-Finish native build and device acceptance, then extend employer/operator catalogs, bulk payroll imports, identity integration, retention and backup/restore, and an external payout simulation. The current fixture models one employer and internal allocations with fictional data.
+Finish native build and device acceptance, then extend employer/operator catalogs, bulk payroll imports, identity integration, retention and backup/restore, maker-checker approval of payout files, a separate bank returns file, and daily settlement clearing against bank statements. The current fixture models one employer, a fictional bank and fictional data.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the project boundaries and verification routes.

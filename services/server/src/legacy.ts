@@ -101,7 +101,7 @@ export class LegacyClient implements Legacy {
           a.amountMinor < 0 ||
           a.amountMinor > 999999999999 ||
           a.currency !== "ZAR" ||
-          !["CLIENT", "EMPLOYEE"].includes(a.kind) ||
+          !["CLIENT", "EMPLOYEE", "SETTLEMENT"].includes(a.kind) ||
           !["ACTIVE", "SUSPENDED"].includes(a.state),
       ) ||
       new Set(data.balances.map((a: any) => a.account)).size !==

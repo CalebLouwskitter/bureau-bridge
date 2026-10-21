@@ -2,6 +2,23 @@
 
 The local second review was performed on 30 September 2026. The project was subsequently published to GitHub and validated there; no application deployment was created.
 
+## EFT payout slice — 21 October 2026
+
+Developed on `feature/eft-payouts`. [GitHub Actions run 39650190448](https://github.com/CalebLouwskitter/bureau-bridge/actions/runs/39650190448) passed against [commit ed37715](https://github.com/CalebLouwskitter/bureau-bridge/commit/ed37715) with the complete Docker stack.
+
+| Check | Result |
+| --- | --- |
+| TypeScript | Server, worker, contracts and Expo checks passed |
+| API/worker/reconciliation/payout suite | 23 passed: deterministic EFT files, amount and account-hash tampering, response parsing, the demo bank's return, replay and duplicate-generation rules, lost-response recovery by inquiry, no send after an unanswered inquiry, the settlement break report, payout API roles |
+| Real GnuCOBOL core | 9 passed, including payout and return postings through settlement, a replayed return, route and funds declines, and the v1 → v3 upgrade adding the settlement account |
+| Real PHP + MariaDB + COBOL | Existing scenarios plus rejection of disallowed routes |
+| Real SQL Server | Migration 003 applied; concurrent payout creation and replay, conflicting reuse, no file before the debit posts, concurrent same-key file generation returning one file, one file per payout, stored-byte hash, once-only response processing, a single keyed return credit, a conflicting second response refused, employee payout visibility, settlement projections |
+| Full-stack smoke | Normal and lost-result recovery as before, then: payouts, file generation and replay, a lost bank response recovered by inquiry, response re-import as a duplicate, a returned item credited by the core, and reconciliation with no HIGH findings and a fully explained settlement balance |
+
+The narrated `npm run demo:payouts` walkthrough also runs in CI after the smoke test and fails on any wrong outcome. Before the CI runs, migration 003 was applied twice to a disposable local SQL Server 2025 database, and the payout store's insert, claim, return and constraint statements were run against it. The demo bank service was also started locally and exercised over HTTP. The local machine has no Docker, PHP or GnuCOBOL, so COBOL, PHP and full-stack evidence comes from CI.
+
+The demo bank is a simulator with fictional branch codes and return codes. BB-EFT v1 is not a real bank format. Returns arrive in the single response rather than in later returns files.
+
 ## Soft fintech mobile slice — 5 October 2026
 
 The Expo redesign is developed on `feature/mobile-soft-fintech` in focused commits with `[skip ci]`, as requested. This slice was validated locally; it has no new GitHub CI result.
