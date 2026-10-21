@@ -64,7 +64,8 @@ class CoreRecoveryTest(unittest.TestCase):
         ref = str(uuid.uuid4())
         self.run_core(ref, fault="before-commit")
         self.assertEqual(self.run_core(ref, mode="QUERY")["records"][0]["status"], "NOTFOUND")
-        self.assertEqual(self.run_core(ref)["balances"][0]["amountMinor"], 25000)
+        balances = {a["account"]: a["amountMinor"] for a in self.run_core(ref)["balances"]}
+        self.assertEqual(balances["EMP000000001"], 25000)
 
     def test_lost_response_after_commit_does_not_double_debit(self):
         ref = str(uuid.uuid4())
