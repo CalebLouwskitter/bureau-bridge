@@ -20,6 +20,7 @@ jobs:
       - run: docker compose exec -T api npm run test:sql --workspace @bureau/server
       - run: docker compose up --build -d --wait worker
       - run: npm run smoke
+      - run: npm run demo:payouts
       - if: always()
         run: docker compose logs --no-color
       - if: always()
