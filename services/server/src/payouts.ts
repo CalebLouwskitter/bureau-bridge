@@ -5,6 +5,8 @@ import {
   type Payout,
   type PayoutFile,
 } from "@bureau/contracts";
+import { PAYOUT_CUTOFF } from "./config.ts";
+import { actionDateFor } from "./business-calendar.ts";
 import {
   buildEft,
   parseResponse,
@@ -119,7 +121,7 @@ export function payoutInput(body: unknown): AllocationInput {
 }
 // Bank action dates follow the bureau's business day.
 export const actionDate = (now = new Date()) =>
-  now.toLocaleDateString("en-CA", { timeZone: "Africa/Johannesburg" });
+  actionDateFor(now, { cutOff: process.env.PAYOUT_CUTOFF ?? PAYOUT_CUTOFF });
 
 export function generateFile(
   store: PayoutStore,

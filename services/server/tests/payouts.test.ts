@@ -23,6 +23,7 @@ import {
 import { BankSimulator, MemoryLedger } from "../src/bank-sim.ts";
 import { deriveUuid, returnKey } from "../src/ids.ts";
 import {
+  actionDate,
   BankUnavailable,
   submitFile,
   type Bank,
@@ -569,4 +570,13 @@ test("payout API: payroll requests, operations files and submits, employees only
     400,
   );
   await app.close();
+});
+
+test("actionDate follows the business-day calendar and cutoff", () => {
+  // 2026-10-21 (Wed) at 12:59 UTC = 14:59 local (before 15:00 cutoff)
+  assert.equal(actionDate(new Date("2026-10-21T12:59:00Z")), "2026-10-21");
+  // 2026-10-21 (Wed) at 13:00 UTC = 15:00 local (at cutoff) -> rolls to next business day
+  assert.equal(actionDate(new Date("2026-10-21T13:00:00Z")), "2026-10-22");
+  // 2026-10-24 (Sat) rolls to Monday
+  assert.equal(actionDate(new Date("2026-10-24T08:00:00Z")), "2026-10-26");
 });

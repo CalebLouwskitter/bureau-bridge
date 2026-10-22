@@ -8,3 +8,4 @@ export function env(name: string, fallback?: string): string {
   if (!value) throw new Error(`Missing configuration: ${name}`);
   return value;
 }
+export const PAYOUT_CUTOFF = env("PAYOUT_CUTOFF", "15:00");
