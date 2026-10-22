@@ -80,7 +80,7 @@ Bank files are where double payment really happens: a re-run job, a resend after
 - **Validate before filing.** Run bank-specific check-digit validation on account numbers. Use the bank's account verification service so a payout goes to the person it names.
 - **Clear settlement daily.** Match settlement movements to the bank statement and investigate breaks with ageing, owners and sign-off.
 - **Controls.** Maker-checker approval on payout files above a threshold, segregation of duties between requesting and releasing, and an append-only, tamper-evident audit trail.
-- **Calendars and cut-offs.** Business-day and public-holiday calendars for action dates, plus bank cut-off times. Same-day and real-time rails such as RTC and PayShap shrink the ambiguity window but don't remove the need for inquiry.
+- **Calendars and cut-offs.** Business-day and public-holiday calendars for action dates and bank cut-off times are now implemented; bank-specific calendars and proclaimed one-off holidays are still open. Same-day and real-time rails such as RTC and PayShap shrink the ambiguity window but don't remove the need for inquiry.
 - **Identity and secrets.** An OIDC identity provider in place of demo users. Secrets in a vault or HSM, rotated, never in `.env`.
 - **POPIA.** Bank details are personal information: encrypt at rest, mask in logs and UIs, limit retention, and log access.
 - **Observability.** One correlation ID carried API → outbox → PHP → batch manifest → core generation → bank file. Alerts on `VERIFYING` age, `SUBMISSION_UNKNOWN`, `NEEDS_REVIEW` and reconciliation `HIGH` findings.
