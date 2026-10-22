@@ -23,12 +23,17 @@ import {
 import { BankSimulator, MemoryLedger } from "../src/bank-sim.ts";
 import { deriveUuid, returnKey } from "../src/ids.ts";
 import {
+  approveFile,
   BankUnavailable,
+  FileAwaitingApproval,
+  Forbidden,
+  generateFile,
   submitFile,
   type Bank,
   type PayoutStore,
   type StoredPayoutFile,
 } from "../src/payouts.ts";
+import { MemoryPayoutStore } from "../src/payout-store.ts";
 import { compare } from "../src/reconciliation.ts";
 import { makeApp } from "../src/app.ts";
 import { issue } from "../src/auth.ts";
@@ -184,6 +189,17 @@ function fileStore(content: string, generation = 1) {
         returned: 1,
       };
     },
+    approvePayoutFile: async (_c: string, _id: string, approver: string) => {
+      if (file.createdBy && file.createdBy === approver) {
+        throw new Forbidden("Creator cannot approve payout file");
+      }
+      if (file.status === "AWAITING_APPROVAL") {
+        file.status = "GENERATED";
+        file.approvedBy = approver;
+        file.approvedAt = new Date().toISOString();
+      }
+      return file;
+    },
   } as unknown as PayoutStore;
   return { store, file, marks, imports };
 }
@@ -233,6 +249,137 @@ test("an unanswered bank inquiry never authorizes a submission", async () => {
     BankUnavailable,
   );
   assert.deepEqual(f.marks, []);
+});
+
+test("maker-checker: threshold boundary determines whether payout file awaits approval", async () => {
+  const mkStore = async (amountMinor: number) => {
+    const store = new MemoryPayoutStore();
+    await store.createPayout("INSURER_DEMO", randomUUID(), {
+      sourceAccount: "INS000000001",
+      targetAccount: "EMP000000001",
+      amountMinor,
+      currency: "ZAR",
+    });
+    return store;
+  };
+
+  // Just below threshold (4,999,999 cents) -> GENERATED
+  const storeBelow = await mkStore(4999999);
+  const fileBelow = await generateFile(
+    storeBelow,
+    "INSURER_DEMO",
+    randomUUID(),
+    new Date(),
+    "maker",
+  );
+  assert.ok(fileBelow);
+  assert.equal(fileBelow.amountTotal, 4999999);
+  assert.equal(fileBelow.status, "GENERATED");
+  assert.equal(fileBelow.createdBy, "maker");
+
+  // Exactly at threshold (5,000,000 cents) -> AWAITING_APPROVAL
+  const storeAt = await mkStore(5000000);
+  const fileAt = await generateFile(
+    storeAt,
+    "INSURER_DEMO",
+    randomUUID(),
+    new Date(),
+    "maker",
+  );
+  assert.ok(fileAt);
+  assert.equal(fileAt.amountTotal, 5000000);
+  assert.equal(fileAt.status, "AWAITING_APPROVAL");
+  assert.equal(fileAt.createdBy, "maker");
+
+  // Above threshold (5,000,001 cents) -> AWAITING_APPROVAL
+  const storeAbove = await mkStore(5000001);
+  const fileAbove = await generateFile(
+    storeAbove,
+    "INSURER_DEMO",
+    randomUUID(),
+    new Date(),
+    "maker",
+  );
+  assert.ok(fileAbove);
+  assert.equal(fileAbove.amountTotal, 5000001);
+  assert.equal(fileAbove.status, "AWAITING_APPROVAL");
+  assert.equal(fileAbove.createdBy, "maker");
+});
+
+test("maker-checker: submit blocked while awaiting approval; approval by checker enables submission", async () => {
+  const store = new MemoryPayoutStore();
+  await store.createPayout("INSURER_DEMO", randomUUID(), {
+    sourceAccount: "INS000000001",
+    targetAccount: "EMP000000001",
+    amountMinor: 5000000,
+    currency: "ZAR",
+  });
+  const file = (await generateFile(
+    store,
+    "INSURER_DEMO",
+    randomUUID(),
+    new Date(),
+    "maker",
+  ))!;
+  assert.equal(file.status, "AWAITING_APPROVAL");
+
+  const bank: Bank = {
+    submit: async (text) =>
+      buildResponse({
+        fileId: file.id,
+        generation: file.generation,
+        status: "ACCEPTED",
+        reason: null,
+        results: [
+          {
+            reference: parseEft(text).items[0].reference,
+            outcome: "PAID",
+            code: null,
+          },
+        ],
+      }),
+    inquire: async () => undefined,
+  };
+
+  // Submitting while awaiting approval throws FileAwaitingApproval (409)
+  await assert.rejects(
+    () => submitFile(store, bank, "INSURER_DEMO", file.id),
+    (err: any) =>
+      err instanceof FileAwaitingApproval &&
+      err.code === "FILE_AWAITING_APPROVAL",
+  );
+
+  // Self-approval rejected (403 Forbidden)
+  await assert.rejects(
+    () => approveFile(store, "INSURER_DEMO", file.id, "maker"),
+    Forbidden,
+  );
+
+  // Second approver succeeds
+  const approved = await approveFile(
+    store,
+    "INSURER_DEMO",
+    file.id,
+    "checker",
+  );
+  assert.equal(approved.status, "GENERATED");
+  assert.equal(approved.approvedBy, "checker");
+  assert.ok(approved.approvedAt);
+
+  // Double approval is a no-op / idempotent
+  const secondApproval = await approveFile(
+    store,
+    "INSURER_DEMO",
+    file.id,
+    "checker",
+  );
+  assert.equal(secondApproval.status, "GENERATED");
+  assert.equal(secondApproval.approvedBy, "checker");
+
+  // An approved file submits normally
+  const result = await submitFile(store, bank, "INSURER_DEMO", file.id);
+  assert.equal(result.status, "RESPONSE_PROCESSED");
+  assert.equal(result.paid, 1);
 });
 
 test("payout routes are only available to the payments hub; derived return keys are stable", () => {

@@ -5,6 +5,7 @@ import {
   type Payout,
   type PayoutFile,
 } from "@bureau/contracts";
+import { Conflict } from "./store.ts";
 import {
   buildEft,
   parseResponse,
@@ -12,6 +13,16 @@ import {
   type BankResponse,
   type EftItem,
 } from "./eft.ts";
+
+export const DEFAULT_APPROVAL_THRESHOLD_CENTS = 5000000;
+export function payoutApprovalThresholdCents(): number {
+  const raw = process.env.PAYOUT_APPROVAL_THRESHOLD_CENTS;
+  if (!raw) return DEFAULT_APPROVAL_THRESHOLD_CENTS;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_APPROVAL_THRESHOLD_CENTS;
+}
 
 export interface StoredPayoutFile extends PayoutFile {
   content: string;
@@ -44,12 +55,19 @@ export interface PayoutStore {
     key: string,
     actionDate: string,
     build: (draft: FileDraft) => string,
+    createdBy?: string,
+    thresholdCents?: number,
   ): Promise<PayoutFile | undefined>;
   listPayoutFiles(clientId: string): Promise<PayoutFile[]>;
   payoutFile(
     clientId: string,
     id: string,
   ): Promise<StoredPayoutFile | undefined>;
+  approvePayoutFile(
+    clientId: string,
+    id: string,
+    approver: string,
+  ): Promise<PayoutFile>;
   markSubmission(
     clientId: string,
     id: string,
@@ -74,6 +92,10 @@ export interface Bank {
 }
 export class NotFound extends Error {}
 export class BankUnavailable extends Error {}
+export class Forbidden extends Error {}
+export class FileAwaitingApproval extends Conflict {
+  readonly code = "FILE_AWAITING_APPROVAL";
+}
 
 export class BankClient implements Bank {
   constructor(
@@ -126,11 +148,27 @@ export function generateFile(
   clientId: string,
   key: string,
   now = new Date(),
+  createdBy?: string,
+  thresholdCents = payoutApprovalThresholdCents(),
 ) {
   const date = actionDate(now);
-  return store.createPayoutFile(clientId, key, date, (draft) =>
-    buildEft({ userCode: USER_CODE, actionDate: date, ...draft }),
+  return store.createPayoutFile(
+    clientId,
+    key,
+    date,
+    (draft) => buildEft({ userCode: USER_CODE, actionDate: date, ...draft }),
+    createdBy,
+    thresholdCents,
   );
+}
+
+export async function approveFile(
+  store: PayoutStore,
+  clientId: string,
+  id: string,
+  approver: string,
+): Promise<PayoutFile> {
+  return store.approvePayoutFile(clientId, id, approver);
 }
 
 export async function importResponse(
@@ -149,6 +187,9 @@ export async function submitFile(
 ): Promise<ImportResult> {
   const file = await store.payoutFile(clientId, id);
   if (!file) throw new NotFound("Payout file not found");
+  if (file.status === "AWAITING_APPROVAL") {
+    throw new FileAwaitingApproval("FILE_AWAITING_APPROVAL");
+  }
   // A timeout can hide a file the bank already received, so ask about this
   // generation first. An unanswered question never authorizes a resend.
   let response: string | undefined;
