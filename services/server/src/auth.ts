@@ -13,6 +13,7 @@ const users: Record<string, Principal> = {
     employeeAccount: "EMP000000001",
   },
   ops: { username: "ops", role: "ops", clientId: "INSURER_DEMO" },
+  "ops-two": { username: "ops-two", role: "ops", clientId: "INSURER_DEMO" },
 };
 export function equal(a: string, b: string) {
   const x = Buffer.from(a),

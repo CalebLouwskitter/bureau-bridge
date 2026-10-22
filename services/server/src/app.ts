@@ -7,7 +7,10 @@ import type { Legacy } from "./legacy.ts";
 import { equal, issue, verify } from "./auth.ts";
 import { reconcile, reportCsv } from "./reconciliation.ts";
 import {
+  approveFile,
   BankUnavailable,
+  FileAwaitingApproval,
+  Forbidden,
   generateFile,
   importResponse,
   NotFound,
@@ -233,6 +236,7 @@ function registerPayouts(
     request.principal!.role === "ops";
   const fail = (error: unknown) => {
     if (error instanceof NotFound) return [404, error.message] as const;
+    if (error instanceof Forbidden) return [403, error.message] as const;
     if (error instanceof Conflict) return [409, error.message] as const;
     if (error instanceof EftError) return [400, error.message] as const;
     if (error instanceof BankUnavailable) return [502, error.message] as const;
@@ -274,7 +278,13 @@ function registerPayouts(
       return reply
         .code(400)
         .send({ error: "Supply a UUID Idempotency-Key header" });
-    const file = await generateFile(store, request.principal!.clientId, key);
+    const file = await generateFile(
+      store,
+      request.principal!.clientId,
+      key,
+      new Date(),
+      request.principal!.username,
+    );
     if (!file)
       return reply
         .code(409)
@@ -307,6 +317,27 @@ function registerPayouts(
     },
   );
   app.post<{ Params: { id: string } }>(
+    "/payout-files/:id/approve",
+    async (request, reply) => {
+      if (!ops(request))
+        return reply.code(403).send({ error: "Operations role required" });
+      if (!UUID.test(request.params.id))
+        return reply.code(404).send({ error: "Payout file not found" });
+      try {
+        const file = await approveFile(
+          store,
+          request.principal!.clientId,
+          request.params.id,
+          request.principal!.username,
+        );
+        return reply.code(200).send(file);
+      } catch (error) {
+        const [code, message] = fail(error);
+        return reply.code(code).send({ error: message });
+      }
+    },
+  );
+  app.post<{ Params: { id: string } }>(
     "/payout-files/:id/submit",
     async (request, reply) => {
       if (!ops(request))
@@ -321,6 +352,11 @@ function registerPayouts(
           request.params.id,
         );
       } catch (error) {
+        if (error instanceof FileAwaitingApproval) {
+          return reply
+            .code(409)
+            .send({ error: error.message, code: error.code });
+        }
         const [code, message] = fail(error);
         return reply.code(code).send({ error: message });
       }
