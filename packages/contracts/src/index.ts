@@ -119,6 +119,7 @@ export interface Payout {
   createdAt: string;
 }
 export type PayoutFileStatus =
+  | "AWAITING_APPROVAL"
   | "GENERATED"
   | "SUBMITTED"
   | "SUBMISSION_UNKNOWN"
@@ -135,6 +136,9 @@ export interface PayoutFile {
   sha256: string;
   status: PayoutFileStatus;
   createdAt: string;
+  createdBy?: string | null;
+  approvedBy?: string | null;
+  approvedAt?: string | null;
 }
 export function payoutStatus(
   p: Pick<Payout, "debitStatus" | "fileId" | "bankOutcome" | "returnStatus">,
