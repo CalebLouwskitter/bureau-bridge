@@ -85,6 +85,7 @@ Bank files are where double payment really happens: a re-run job, a resend after
 - **POPIA.** Bank details are personal information: encrypt at rest, mask in logs and UIs, limit retention, and log access.
 - **Observability.** One correlation ID carried API → outbox → PHP → batch manifest → core generation → bank file. Alerts on `VERIFYING` age, `SUBMISSION_UNKNOWN`, `NEEDS_REVIEW` and reconciliation `HIGH` findings.
 - **Operations.** Backups and restore drills for core generations, generation pruning, and DR. Load tests to find the real batch and file limits.
+- **Performance and load testing.** Load testing allocations (`npm run load` and `npm run load:replay`, N=500, C=10) asserts zero duplicate postings under 100% concurrent replay. The structural bottleneck is the single-writer COBOL lock (`batch.lock`) and PHP intake limit of 100 records per batch, coupled with Fastify's 120 req/min intake rate limit. See [performance analysis](performance.md).
 - **Scale.** Replace the single-writer core with a partitioned ledger service. Use CDC instead of a polled outbox, and pick a broker with at-least-once delivery and consumer-side deduplication.
 
 ## Likely questions, with answers
