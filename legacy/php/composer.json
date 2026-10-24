@@ -1,0 +1,21 @@
+{
+    "name": "bureau/legacy-php",
+    "description": "Legacy PHP boundary tooling and tests",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": "^8.3"
+    },
+    "require-dev": {
+        "phpstan/phpstan": "^2.1",
+        "phpunit/phpunit": "^11.5"
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Bureau\\Legacy\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
