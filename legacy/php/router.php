@@ -9,8 +9,9 @@ function bearer(string $name): void {
     if (!hash_equals('Bearer '.config($name),$_SERVER['HTTP_AUTHORIZATION'] ?? '')) respond(['error'=>'Unauthorized'],401);
 }
 try {
-    $path = parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH);
-    $method = $_SERVER['REQUEST_METHOD'];
+    $path = parse_url($_SERVER['REQUEST_URI'] ?? '',PHP_URL_PATH);
+    $path = is_string($path) ? $path : '';
+    $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
     if ($path === '/health') { db()->query('SELECT 1'); respond(['status'=>'ok']); }
     if (str_starts_with($path,'/v1/')) {
         if (preg_match('#^/v1/requests/([0-9a-f-]{36})/retry$#D',$path,$matches) && $method==='POST') {
@@ -24,6 +25,7 @@ try {
         if ($path==='/v1/reconciliation' && $method==='GET') respond(reconciliation_inventory());
         if ($path==='/v1/requests' && $method==='POST') {
             $raw = file_get_contents('php://input',false,null,0,8193);
+            if ($raw === false) respond(['error'=>'Cannot read request body'],400);
             if (strlen($raw)>8192) respond(['error'=>'Body too large'],413);
             $data = json_decode($raw,true,32,JSON_THROW_ON_ERROR);
             if (!is_array($data)) respond(['error'=>'Expected object'],400);
@@ -43,7 +45,8 @@ try {
     }
     if ($method==='GET' && in_array($path,['/reports/requests.csv','/reports/batches.csv'],true)) {
         if ($path==='/reports/requests.csv') {
-            $report=db()->query('SELECT * FROM requests ORDER BY created_at,reference LIMIT 5001')->fetchAll(PDO::FETCH_ASSOC);
+            $query = db()->query('SELECT * FROM requests ORDER BY created_at,reference LIMIT 5001');
+            $report = $query !== false ? $query->fetchAll(PDO::FETCH_ASSOC) : [];
             $columns=['reference','source_account','target_account','amount_minor','currency','status','reason','posting_id','batch_id'];
         } else {
             $report=batch_controls();
@@ -70,9 +73,12 @@ try {
                 'targetAccount'=>$_POST['targetAccount'] ?? '', 'amountMinor'=>$amount,'currency'=>'ZAR'])['reference'];
         }
     }
-    $rows=db()->query('SELECT * FROM requests ORDER BY created_at DESC LIMIT 50')->fetchAll(PDO::FETCH_ASSOC);
+    $query = db()->query('SELECT * FROM requests ORDER BY created_at DESC LIMIT 50');
+    $rows = $query !== false ? $query->fetchAll(PDO::FETCH_ASSOC) : [];
     $batches=array_slice(batch_controls(),0,50);
-    function h(mixed $value): string { return htmlspecialchars((string)$value,ENT_QUOTES,'UTF-8'); }
+    if (!function_exists('h')) {
+        function h(mixed $value): string { return htmlspecialchars((string)$value,ENT_QUOTES,'UTF-8'); }
+    }
     require __DIR__.'/portal.php';
 } catch (InvalidArgumentException|JsonException $e) { respond(['error'=>$e->getMessage()],400); }
 catch (DomainException $e) { respond(['error'=>$e->getMessage()],409); }
