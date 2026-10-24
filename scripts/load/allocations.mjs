@@ -20,6 +20,7 @@ const { values } = parseArgs({
   options: {
     count: { type: "string", short: "n", default: "500" },
     concurrency: { type: "string", short: "c", default: "10" },
+    replay: { type: "boolean", default: false },
     amount: { type: "string", default: "100" },
     url: {
       type: "string",
@@ -40,6 +41,7 @@ Usage: node scripts/load/allocations.mjs [options]
 Options:
   -n, --count <number>          Number of allocation requests (default: 500)
   -c, --concurrency <number>    Concurrency limit (default: 10)
+      --replay                  Send every request twice concurrently with same key (idempotency test)
       --amount <minor>          Allocation amount in cents (default: 100 = R1.00)
       --url <url>               API base URL (default: http://localhost:3000)
       --timeout <seconds>       Timeout in seconds waiting for final states (default: 300)
@@ -52,6 +54,7 @@ Options:
 
 const N = parseInt(values.count, 10);
 const C = parseInt(values.concurrency, 10);
+const isReplay = Boolean(values.replay);
 const amountMinor = parseInt(values.amount, 10);
 const base = values.url.replace(/\/+$/, "");
 const timeoutMs = parseInt(values.timeout, 10) * 1000;
@@ -146,8 +149,10 @@ async function main() {
   console.log("  BureauBridge Allocations Load Test");
   console.log("=================================================");
   console.log(`Target URL:        ${base}`);
-  console.log(`Requests (N):      ${N}`);
+  console.log(`Unique Keys (N):   ${N}`);
   console.log(`Concurrency (C):   ${C}`);
+  console.log(`Mode:              ${isReplay ? "Concurrent Replay (2x per key)" : "Standard"}`);
+  console.log(`Total Submissions: ${isReplay ? 2 * N : N}`);
   console.log(`Amount:            R${(amountMinor / 100).toFixed(2)} (${amountMinor} cents)`);
   console.log(`Auto-batching:     ${autoBatch ? "Enabled" : "Disabled"}`);
   console.log("-------------------------------------------------");
@@ -172,6 +177,36 @@ async function main() {
   }
   console.log("Authentication successful.");
 
+  // Helper to submit a single HTTP allocation request
+  async function submitOnce(key, payload) {
+    const t0 = performance.now();
+    const res = await fetch(`${base}/allocations`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${payrollToken}`,
+        "Idempotency-Key": key,
+      },
+      body: JSON.stringify(payload),
+    });
+    const t1 = performance.now();
+    const latency = t1 - t0;
+
+    let body;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+
+    return {
+      status: res.status,
+      latency,
+      body,
+      key,
+    };
+  }
+
   // 2. Generate allocation payloads with unique idempotency keys
   const requests = Array.from({ length: N }, (_, i) => ({
     index: i,
@@ -185,54 +220,81 @@ async function main() {
   }));
 
   // 3. Dispatch submissions at concurrency C
-  console.log(`\nSubmitting ${N} requests at ${C} concurrency...`);
+  console.log(
+    `\nSubmitting ${isReplay ? `${N} key pairs (${2 * N} requests concurrently)` : `${N} requests`} at ${C} concurrency...`,
+  );
   const submissionStartTime = performance.now();
+  const allAcceptanceLatencies = [];
 
   const submitted = await mapConcurrent(requests, C, async (req) => {
-    const t0 = performance.now();
-    const res = await fetch(`${base}/allocations`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${payrollToken}`,
-        "Idempotency-Key": req.key,
-      },
-      body: JSON.stringify(req.payload),
-    });
-    const t1 = performance.now();
-    const latency = t1 - t0;
+    const tStart = performance.now();
 
-    let body;
-    try {
-      body = await res.json();
-    } catch {
-      body = null;
-    }
+    if (isReplay) {
+      // Replay mode: send every request twice concurrently with the exact same idempotency key
+      const [res1, res2] = await Promise.all([
+        submitOnce(req.key, req.payload),
+        submitOnce(req.key, req.payload),
+      ]);
 
-    if (res.status !== 202) {
-      throw new Error(
-        `Request ${req.index} failed with HTTP ${res.status}: ${JSON.stringify(body)}`,
+      if (res1.status !== 202) {
+        throw new Error(
+          `Request ${req.index} (call 1) failed with HTTP ${res1.status}: ${JSON.stringify(res1.body)}`,
+        );
+      }
+      if (res2.status !== 202) {
+        throw new Error(
+          `Request ${req.index} (replay call 2) failed with HTTP ${res2.status}: ${JSON.stringify(res2.body)}`,
+        );
+      }
+
+      assert.ok(res1.body && res1.body.id, `Missing allocation id in response 1: ${JSON.stringify(res1.body)}`);
+      assert.ok(res2.body && res2.body.id, `Missing allocation id in response 2: ${JSON.stringify(res2.body)}`);
+      assert.equal(
+        res1.body.id,
+        res2.body.id,
+        `Replay idempotency violation: key ${req.key} returned different IDs (${res1.body.id} vs ${res2.body.id})`,
       );
+
+      allAcceptanceLatencies.push(res1.latency, res2.latency);
+
+      return {
+        index: req.index,
+        key: req.key,
+        id: res1.body.id,
+        acceptanceLatency: Math.max(res1.latency, res2.latency),
+        submittedAt: tStart,
+      };
+    } else {
+      const res = await submitOnce(req.key, req.payload);
+
+      if (res.status !== 202) {
+        throw new Error(
+          `Request ${req.index} failed with HTTP ${res.status}: ${JSON.stringify(res.body)}`,
+        );
+      }
+
+      assert.ok(res.body && res.body.id, `Missing allocation id in response: ${JSON.stringify(res.body)}`);
+      allAcceptanceLatencies.push(res.latency);
+
+      return {
+        index: req.index,
+        key: req.key,
+        id: res.body.id,
+        acceptanceLatency: res.latency,
+        submittedAt: tStart,
+      };
     }
-
-    assert.ok(body && body.id, `Missing allocation id in response: ${JSON.stringify(body)}`);
-
-    return {
-      index: req.index,
-      key: req.key,
-      id: body.id,
-      acceptanceLatency: latency,
-      submittedAt: t0,
-    };
   });
 
   const submissionEndTime = performance.now();
   const totalSubmissionSec = (submissionEndTime - submissionStartTime) / 1000;
-  const acceptanceLatencies = submitted.map((s) => s.acceptanceLatency);
-  const acceptanceStats = stats(acceptanceLatencies);
-  const throughput = N / totalSubmissionSec;
+  const acceptanceStats = stats(allAcceptanceLatencies);
+  const totalHttpRequests = isReplay ? 2 * N : N;
+  const throughput = totalHttpRequests / totalSubmissionSec;
 
-  console.log(`All ${N} requests accepted in ${totalSubmissionSec.toFixed(2)}s (${throughput.toFixed(1)} req/s).`);
+  console.log(
+    `All ${totalHttpRequests} HTTP requests accepted in ${totalSubmissionSec.toFixed(2)}s (${throughput.toFixed(1)} req/s).`,
+  );
 
   // 4. Poll until every request reaches a final state
   console.log(`\nWaiting for all requests to reach a final state (timeout: ${timeoutMs / 1000}s)...`);
@@ -376,12 +438,24 @@ async function main() {
   assert.equal(highSeverityFindings, 0, "High severity findings found in reconciliation!");
   assert.equal(batchControlMismatches, 0, "Batch control mismatches detected in reconciliation!");
 
+  if (isReplay) {
+    // Assert that replay mode produces exactly N postings
+    const postedCount = statusCounts["POSTED"] ?? 0;
+    assert.equal(
+      postedCount,
+      N,
+      `Replay mode expected exactly ${N} POSTED allocations, but found ${postedCount}`,
+    );
+  }
+
   // 7. Print summary report
   console.log("\n=================================================");
   console.log("  Load Test Results");
   console.log("=================================================");
-  console.log(`Total Requests:         ${N}`);
-  console.log(`Concurrency:            ${C}`);
+  console.log(`Unique Keys (N):        ${N}`);
+  console.log(`Concurrency (C):        ${C}`);
+  console.log(`Replay Mode:            ${isReplay ? "Enabled (2x concurrent requests per key)" : "Disabled"}`);
+  console.log(`Total HTTP Requests:    ${totalHttpRequests}`);
   console.log(`Throughput:             ${throughput.toFixed(1)} req/s`);
   console.log("\n--- API Acceptance Latency (HTTP 202) ---");
   console.log(`p50:                    ${acceptanceStats.p50.toFixed(1)} ms`);
@@ -405,6 +479,9 @@ async function main() {
   console.log(`Duplicate Postings:     ${duplicatePostingIds}`);
   console.log(`High Severity Findings: ${highSeverityFindings}`);
   console.log(`Batch Mismatches:       ${batchControlMismatches}`);
+  if (isReplay) {
+    console.log(`Exact Postings Assert:  PASS (${statusCounts["POSTED"]} postings for ${2 * N} requests)`);
+  }
   console.log("=================================================");
   console.log("PASS: Load test completed successfully with zero duplicates.");
 }
