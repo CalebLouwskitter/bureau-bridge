@@ -24,6 +24,7 @@ import {
 } from "./components";
 import {
   accountName,
+  formatAmountForSpeech,
   isFinal,
   money,
   statusLabels,
@@ -60,7 +61,12 @@ export function SignIn({ bureau: b }: { bureau: Bureau }) {
           <Heading>Welcome back</Heading>
           <Body>Choose a demo role and sign in.</Body>
         </YStack>
-        <XStack gap={6}>
+        <XStack
+          gap={6}
+          accessibilityRole="radiogroup"
+          role="radiogroup"
+          aria-label="Demo role"
+        >
           {[
             ["Payroll", "insurer-admin"],
             ["Employee", "employee-one"],
@@ -76,10 +82,16 @@ export function SignIn({ bureau: b }: { bureau: Bureau }) {
               fontSize={12}
               fontWeight="600"
               disabled={b.busy}
+              accessibilityRole="button"
+              role="button"
               accessibilityLabel={`Choose ${label} demo role`}
               aria-label={`Choose ${label} demo role`}
-              accessibilityState={{ selected: b.username === username }}
+              accessibilityState={{
+                selected: b.username === username,
+                disabled: b.busy,
+              }}
               aria-pressed={b.username === username}
+              aria-disabled={b.busy}
               backgroundColor={
                 b.username === username ? "$accentSoft" : "$surfaceMuted"
               }
@@ -87,6 +99,7 @@ export function SignIn({ bureau: b }: { bureau: Bureau }) {
                 b.username === username ? "$accentStrong" : "$borderColor"
               }
               color="$color"
+              focusStyle={{ outlineColor: "$accentStrong", outlineWidth: 2 }}
               onPress={() => b.setUsername(username)}
             >
               {label}
@@ -154,10 +167,13 @@ export function SignIn({ bureau: b }: { bureau: Bureau }) {
               borderRadius={14}
               backgroundColor="$surfaceMuted"
               borderColor="$borderColor"
+              accessibilityRole="button"
+              role="button"
               accessibilityLabel={
                 showPassword ? "Hide password" : "Show password"
               }
               aria-label={showPassword ? "Hide password" : "Show password"}
+              focusStyle={{ outlineColor: "$accentStrong", outlineWidth: 2 }}
               onPress={() => setShowPassword(!showPassword)}
             >
               {showPassword ? (
@@ -215,6 +231,9 @@ export function Home({
       >
         <XStack justifyContent="space-between" alignItems="center" gap={12}>
           <Text
+            accessibilityRole="header"
+            role="heading"
+            aria-level={2}
             color="$onAccent"
             fontSize={14}
             lineHeight={21}
@@ -234,6 +253,9 @@ export function Home({
           adjustsFontSizeToFit
           numberOfLines={1}
           minimumFontScale={0.65}
+          accessibilityLabel={
+            main ? formatAmountForSpeech(main.amountMinor) : "Awaiting sync"
+          }
         >
           {main ? money(main.amountMinor) : "Awaiting sync"}
         </Text>
@@ -266,16 +288,25 @@ export function Home({
         <Card>
           <Heading>Unfinished request</Heading>
           <Body>
-            {money(b.pending.amountMinor)} for{" "}
-            {accountName(b.pending.targetAccount)} is saved on this device.
-            Retry keeps its original reference.
+            <Text
+              color="$muted"
+              accessibilityLabel={formatAmountForSpeech(b.pending.amountMinor)}
+            >
+              {money(b.pending.amountMinor)}
+            </Text>
+            {` for ${accountName(b.pending.targetAccount)} is saved on this device. Retry keeps its original reference.`}
           </Body>
         </Card>
       )}
       <YStack gap={12}>
         <XStack alignItems="center" justifyContent="space-between" gap={8}>
           <Heading>Recent activity</Heading>
-          <TextAction onPress={() => navigate("activity")}>See all</TextAction>
+          <TextAction
+            label="See all recent activity"
+            onPress={() => navigate("activity")}
+          >
+            See all
+          </TextAction>
         </XStack>
         {b.rows.slice(0, 2).map((allocation) => (
           <AllocationSummary key={allocation.id} allocation={allocation} />
@@ -301,7 +332,12 @@ export function Home({
                   <Text color="$color" fontWeight="600" fontSize={14}>
                     {accountName(a.account)}
                   </Text>
-                  <Text color="$color" fontWeight="600" fontSize={16}>
+                  <Text
+                    color="$color"
+                    fontWeight="600"
+                    fontSize={16}
+                    accessibilityLabel={formatAmountForSpeech(a.amountMinor)}
+                  >
                     {money(a.amountMinor)}
                   </Text>
                 </XStack>
@@ -341,66 +377,73 @@ export function Allocate({
       </YStack>
       <Card>
         <Heading>Choose an employee</Heading>
-        {EMPLOYEE_ACCOUNTS.map((id, index) => (
-          <Button
-            key={id}
-            unstyled
-            disabled={locked}
-            onPress={() => b.setEmployee(id)}
-            accessibilityRole="radio"
-            role="radio"
-            accessibilityLabel={`Employee ${index + 1}${index === 2 ? ", suspended" : ""}`}
-            aria-label={`Employee ${index + 1}${index === 2 ? ", suspended" : ""}`}
-            accessibilityState={{
-              checked: b.employee === id,
-              disabled: locked,
-            }}
-            aria-disabled={locked}
-            aria-checked={b.employee === id}
-            minHeight={78}
-            height="auto"
-            padding={14}
-            borderRadius={16}
-            borderWidth={1}
-            borderColor={b.employee === id ? "$accentStrong" : "$borderColor"}
-            backgroundColor={b.employee === id ? "$accentSoft" : "$surface"}
-            opacity={b.busy ? 0.5 : 1}
-            pressStyle={{ opacity: 0.8 }}
-            focusStyle={{ outlineColor: "$accentStrong", outlineWidth: 2 }}
-          >
-            <XStack gap={12} alignItems="center" width="100%">
-              <YStack
-                width={40}
-                height={40}
-                borderRadius={13}
-                backgroundColor="$surfaceMuted"
-                alignItems="center"
-                justifyContent="center"
-              >
-                <Text color="$color" fontWeight="600" fontSize={14}>
-                  E{index + 1}
-                </Text>
-              </YStack>
-              <YStack flex={1} gap={3}>
-                <Text color="$color" fontSize={15} fontWeight="600">
-                  Employee {index + 1}
-                </Text>
-                <Body
-                  fontSize={12}
-                  lineHeight={18}
-                  color={index === 2 ? "$danger" : "$muted"}
+        <YStack
+          gap={12}
+          accessibilityRole="radiogroup"
+          role="radiogroup"
+          aria-label="Choose an employee"
+        >
+          {EMPLOYEE_ACCOUNTS.map((id, index) => (
+            <Button
+              key={id}
+              unstyled
+              disabled={locked}
+              onPress={() => b.setEmployee(id)}
+              accessibilityRole="radio"
+              role="radio"
+              accessibilityLabel={`Employee ${index + 1}${index === 2 ? ", suspended" : ""}`}
+              aria-label={`Employee ${index + 1}${index === 2 ? ", suspended" : ""}`}
+              accessibilityState={{
+                checked: b.employee === id,
+                disabled: locked,
+              }}
+              aria-disabled={locked}
+              aria-checked={b.employee === id}
+              minHeight={78}
+              height="auto"
+              padding={14}
+              borderRadius={16}
+              borderWidth={1}
+              borderColor={b.employee === id ? "$accentStrong" : "$borderColor"}
+              backgroundColor={b.employee === id ? "$accentSoft" : "$surface"}
+              opacity={b.busy ? 0.5 : 1}
+              pressStyle={{ opacity: 0.8 }}
+              focusStyle={{ outlineColor: "$accentStrong", outlineWidth: 2 }}
+            >
+              <XStack gap={12} alignItems="center" width="100%">
+                <YStack
+                  width={40}
+                  height={40}
+                  borderRadius={13}
+                  backgroundColor="$surfaceMuted"
+                  alignItems="center"
+                  justifyContent="center"
                 >
-                  {index === 2
-                    ? "Suspended · demo decline"
-                    : "Active payable account"}
-                </Body>
-              </YStack>
-              {b.employee === id && (
-                <Check size={20} color={p.accentStrong} aria-hidden />
-              )}
-            </XStack>
-          </Button>
-        ))}
+                  <Text color="$color" fontWeight="600" fontSize={14}>
+                    E{index + 1}
+                  </Text>
+                </YStack>
+                <YStack flex={1} gap={3}>
+                  <Text color="$color" fontSize={15} fontWeight="600">
+                    Employee {index + 1}
+                  </Text>
+                  <Body
+                    fontSize={12}
+                    lineHeight={18}
+                    color={index === 2 ? "$danger" : "$muted"}
+                  >
+                    {index === 2
+                      ? "Suspended · demo decline"
+                      : "Active payable account"}
+                  </Body>
+                </YStack>
+                {b.employee === id && (
+                  <Check size={20} color={p.accentStrong} aria-hidden />
+                )}
+              </XStack>
+            </Button>
+          ))}
+        </YStack>
       </Card>
       <Card>
         <XStack alignItems="center" justifyContent="space-between">
@@ -488,9 +531,16 @@ export function Activity({ bureau: b }: { bureau: Bureau }) {
       </YStack>
       <XStack alignItems="center" justifyContent="space-between" gap={8}>
         <Body fontSize={12}>Latest {b.rows.length} allocations</Body>
-        <TextAction onPress={() => void b.refresh()}>Refresh</TextAction>
+        <TextAction label="Refresh activity" onPress={() => void b.refresh()}>
+          Refresh
+        </TextAction>
       </XStack>
-      <XStack gap={6}>
+      <XStack
+        gap={6}
+        accessibilityRole="toolbar"
+        role="group"
+        aria-label="Filter allocations"
+      >
         {(
           [
             ["all", "All"],
@@ -507,11 +557,16 @@ export function Activity({ bureau: b }: { bureau: Bureau }) {
             borderRadius={12}
             fontSize={12}
             fontWeight="600"
+            accessibilityRole="button"
+            role="button"
+            accessibilityLabel={`Show ${label.toLowerCase()} allocations`}
+            aria-label={`Show ${label.toLowerCase()} allocations`}
             accessibilityState={{ selected: filter === value }}
             aria-pressed={filter === value}
             backgroundColor={filter === value ? "$accentSoft" : "$surface"}
             borderColor={filter === value ? "$accentStrong" : "$borderColor"}
             color="$color"
+            focusStyle={{ outlineColor: "$accentStrong", outlineWidth: 2 }}
             onPress={() => setFilter(value)}
           >
             {label}
@@ -536,7 +591,13 @@ export function Activity({ bureau: b }: { bureau: Bureau }) {
             flexWrap="wrap"
           >
             <Heading>{accountName(a.targetAccount)}</Heading>
-            <Text color="$color" fontSize={22} lineHeight={29} fontWeight="600">
+            <Text
+              color="$color"
+              fontSize={22}
+              lineHeight={29}
+              fontWeight="600"
+              accessibilityLabel={formatAmountForSpeech(a.amountMinor)}
+            >
               {money(a.amountMinor)}
             </Text>
           </XStack>
@@ -571,7 +632,7 @@ export function Activity({ bureau: b }: { bureau: Bureau }) {
                 <YStack
                   key={index}
                   borderLeftWidth={2}
-                  borderLeftColor="$accent"
+                  borderLeftColor="$accentStrong"
                   paddingLeft={14}
                   gap={3}
                 >

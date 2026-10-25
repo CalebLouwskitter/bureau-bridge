@@ -28,6 +28,20 @@ export const money = (minor: number) =>
     maximumFractionDigits: 2,
   })}`;
 
+export function formatAmountForSpeech(minor: number): string {
+  const rounded = Math.round(minor);
+  const sign = rounded < 0 ? "minus " : "";
+  const abs = Math.abs(rounded);
+  const rands = Math.floor(abs / 100);
+  const cents = abs % 100;
+  const randsStr = `${rands.toLocaleString("en-ZA")} rand`;
+  if (cents === 0) {
+    return `${sign}${randsStr}`;
+  }
+  const centsStr = cents === 1 ? "1 cent" : `${cents} cents`;
+  return `${sign}${randsStr} and ${centsStr}`;
+}
+
 // The bureau's cutoffs and displayed observations use the same timezone.
 export const timestamp = (value: string) =>
   new Date(value).toLocaleString("en-ZA", {

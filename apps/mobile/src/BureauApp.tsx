@@ -67,6 +67,7 @@ export function BureauApp() {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
         <XStack
+          role="banner"
           width="100%"
           maxWidth={600}
           alignSelf="center"
@@ -148,6 +149,8 @@ export function BureauApp() {
         <ScrollView
           testID="screen-scroll"
           ref={scroll}
+          role="main"
+          aria-label="Main content"
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
           contentContainerStyle={{
@@ -182,8 +185,11 @@ export function BureauApp() {
                 padding={0}
                 borderRadius={12}
                 chromeless
+                accessibilityRole="button"
+                role="button"
                 accessibilityLabel="Dismiss message"
                 aria-label="Dismiss message"
+                focusStyle={{ outlineColor: "$accentStrong", outlineWidth: 2 }}
                 onPress={b.clearMessage}
               >
                 <X size={18} color={p.warning} aria-hidden />
@@ -212,6 +218,8 @@ export function BureauApp() {
         </ScrollView>
         {!!b.token && (
           <YStack
+            accessibilityRole="toolbar"
+            aria-label="Bottom navigation"
             backgroundColor="$surface"
             borderTopWidth={1}
             borderTopColor="$borderColor"
