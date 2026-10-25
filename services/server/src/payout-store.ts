@@ -12,7 +12,9 @@ import { Conflict, SqlStore } from "./store.ts";
 import { hashTotal, parseEft, sha256, type BankResponse } from "./eft.ts";
 import { fingerprint, returnKey } from "./ids.ts";
 import {
+  Forbidden,
   NotFound,
+  payoutApprovalThresholdCents,
   type FileDraft,
   type ImportResult,
   type PayoutStore,
@@ -44,17 +46,33 @@ function mapPayout(row: any): Payout {
 }
 function mapFile(row: any): StoredPayoutFile {
   return {
-    id: row.Id,
-    clientId: row.ClientId,
-    generation: row.Generation,
-    actionDate: row.ActionDate.toISOString().slice(0, 10),
-    itemCount: row.ItemCount,
-    amountTotal: Number(row.AmountTotal),
-    hashTotal: Number(row.HashTotal),
-    sha256: row.Sha256,
-    status: row.Status,
-    createdAt: row.CreatedAt.toISOString(),
-    content: row.Content,
+    id: row.Id ?? row.id,
+    clientId: row.ClientId ?? row.clientId,
+    generation: row.Generation ?? row.generation,
+    actionDate:
+      row.ActionDate instanceof Date
+        ? row.ActionDate.toISOString().slice(0, 10)
+        : typeof row.ActionDate === "string"
+          ? row.ActionDate.slice(0, 10)
+          : typeof row.actionDate === "string"
+            ? row.actionDate.slice(0, 10)
+            : String(row.ActionDate ?? row.actionDate),
+    itemCount: Number(row.ItemCount ?? row.itemCount),
+    amountTotal: Number(row.AmountTotal ?? row.amountTotal),
+    hashTotal: Number(row.HashTotal ?? row.hashTotal),
+    sha256: row.Sha256 ?? row.sha256,
+    status: row.Status ?? row.status,
+    createdAt:
+      row.CreatedAt instanceof Date
+        ? row.CreatedAt.toISOString()
+        : (row.CreatedAt ?? row.createdAt),
+    content: row.Content ?? row.content,
+    createdBy: row.CreatedBy ?? row.createdBy ?? null,
+    approvedBy: row.ApprovedBy ?? row.approvedBy ?? null,
+    approvedAt:
+      row.ApprovedAt instanceof Date
+        ? row.ApprovedAt.toISOString()
+        : (row.ApprovedAt ?? row.approvedAt ?? null),
   };
 }
 const withoutContent = ({
@@ -97,6 +115,8 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
     key: string,
     actionDate: string,
     build: (draft: FileDraft) => string,
+    createdBy?: string,
+    thresholdCents = payoutApprovalThresholdCents(),
   ): Promise<PayoutFile | undefined> {
     for (let attempt = 0; ; attempt++) {
       const tx = new sql.Transaction(this.pool);
@@ -147,6 +167,8 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
         // Check the built file the way the bank will before storing it.
         const parsed = parseEft(content);
         const amountTotal = parsed.items.reduce((s, i) => s + i.amountMinor, 0);
+        const status =
+          amountTotal >= thresholdCents ? "AWAITING_APPROVAL" : "GENERATED";
         await request()
           .input("id", sql.Char(36), fileId)
           .input("generation", sql.Int, next)
@@ -156,13 +178,15 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
           .input("hashTotal", sql.BigInt, Number(hashTotal(parsed.items)))
           .input("sha", sql.Char(64), sha256(content))
           .input("content", sql.VarChar(sql.MAX), content)
+          .input("status", sql.VarChar(20), status)
+          .input("createdBy", sql.VarChar(60), createdBy ?? null)
           .input(
             "ids",
             sql.NVarChar(sql.MAX),
             JSON.stringify(rows.map((r: any) => r.Id)),
           )
-          .query(`INSERT dbo.PayoutFiles (Id,ClientId,IdempotencyKey,Generation,ActionDate,ItemCount,AmountTotal,HashTotal,Sha256,Content,Status)
-            VALUES (@id,@client,@key,@generation,@date,@count,@amount,@hashTotal,@sha,@content,'GENERATED');
+          .query(`INSERT dbo.PayoutFiles (Id,ClientId,IdempotencyKey,Generation,ActionDate,ItemCount,AmountTotal,HashTotal,Sha256,Content,Status,CreatedBy)
+            VALUES (@id,@client,@key,@generation,@date,@count,@amount,@hashTotal,@sha,@content,@status,@createdBy);
             UPDATE dbo.PayoutInstructions SET PayoutFileId=@id
               WHERE PayoutFileId IS NULL AND Id IN (SELECT value FROM OPENJSON(@ids));
             IF @@ROWCOUNT<>@count THROW 51000,'Payout instructions changed during file generation',1;`);
@@ -184,7 +208,7 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
       .input("client", sql.VarChar(30), clientId)
       .query(
         `SELECT TOP (100) Id,ClientId,Generation,ActionDate,ItemCount,AmountTotal,HashTotal,Sha256,Status,
-          CreatedAt,'' AS Content FROM dbo.PayoutFiles WHERE ClientId=@client ORDER BY Generation DESC`,
+          CreatedAt,CreatedBy,ApprovedBy,ApprovedAt,'' AS Content FROM dbo.PayoutFiles WHERE ClientId=@client ORDER BY Generation DESC`,
       );
     return result.recordset.map((r: any) => withoutContent(mapFile(r)));
   }
@@ -195,6 +219,47 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
       .input("id", sql.Char(36), id)
       .query("SELECT * FROM dbo.PayoutFiles WHERE ClientId=@client AND Id=@id");
     return result.recordset[0] ? mapFile(result.recordset[0]) : undefined;
+  }
+  async approvePayoutFile(
+    clientId: string,
+    id: string,
+    approver: string,
+  ): Promise<PayoutFile> {
+    const tx = new sql.Transaction(this.pool);
+    await tx.begin();
+    try {
+      const request = () =>
+        new sql.Request(tx)
+          .input("client", sql.VarChar(30), clientId)
+          .input("id", sql.Char(36), id);
+      const row = (
+        await request().query(`SET XACT_ABORT ON;
+          SELECT * FROM dbo.PayoutFiles WITH (UPDLOCK,HOLDLOCK) WHERE ClientId=@client AND Id=@id`)
+      ).recordset[0];
+      if (!row) throw new NotFound("Payout file not found");
+      if (row.CreatedBy && row.CreatedBy === approver) {
+        throw new Forbidden("Creator cannot approve payout file");
+      }
+      if (row.Status === "AWAITING_APPROVAL") {
+        await request()
+          .input("approver", sql.VarChar(60), approver)
+          .query(`UPDATE dbo.PayoutFiles
+            SET Status='GENERATED', ApprovedBy=@approver, ApprovedAt=SYSUTCDATETIME(), UpdatedAt=SYSUTCDATETIME()
+            WHERE ClientId=@client AND Id=@id AND Status='AWAITING_APPROVAL'`);
+        const updated = (
+          await request().query(
+            "SELECT * FROM dbo.PayoutFiles WHERE ClientId=@client AND Id=@id",
+          )
+        ).recordset[0];
+        await tx.commit();
+        return withoutContent(mapFile(updated));
+      }
+      await tx.commit();
+      return withoutContent(mapFile(row));
+    } catch (error) {
+      await tx.rollback().catch(() => {});
+      throw error;
+    }
   }
   async markSubmission(
     clientId: string,
@@ -354,6 +419,183 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
       files: files.recordset.slice(0, 5000).map(mapFile),
       truncated:
         payouts.recordset.length > 5000 || files.recordset.length > 5000,
+    };
+  }
+}
+
+export class MemoryPayoutStore implements PayoutStore {
+  readonly payouts = new Map<string, Payout>();
+  readonly files = new Map<string, StoredPayoutFile>();
+  readonly idempotency = new Map<string, string>();
+  readonly submissions: string[] = [];
+
+  async createPayout(
+    clientId: string,
+    key: string,
+    input: AllocationInput,
+  ): Promise<Payout> {
+    const existingId = this.idempotency.get(`${clientId}:payout:${key}`);
+    if (existingId) return this.payouts.get(existingId)!;
+    const id = randomUUID();
+    const p: Payout = {
+      id,
+      clientId,
+      employeeAccount: input.targetAccount,
+      amountMinor: input.amountMinor,
+      currency: "ZAR",
+      branch: "990001",
+      bankAccount: "10000000017",
+      holder: "EMPLOYEE",
+      debitStatus: "POSTED",
+      fileId: null,
+      bankOutcome: null,
+      returnCode: null,
+      returnAllocationId: null,
+      returnStatus: null,
+      status: "READY",
+      createdAt: new Date().toISOString(),
+    };
+    this.payouts.set(id, p);
+    this.idempotency.set(`${clientId}:payout:${key}`, id);
+    return p;
+  }
+
+  async listPayouts(clientId: string, employee?: string): Promise<Payout[]> {
+    return Array.from(this.payouts.values()).filter(
+      (p) =>
+        p.clientId === clientId &&
+        (!employee || p.employeeAccount === employee),
+    );
+  }
+
+  async createPayoutFile(
+    clientId: string,
+    key: string,
+    actionDate: string,
+    build: (draft: FileDraft) => string,
+    createdBy?: string,
+    thresholdCents = payoutApprovalThresholdCents(),
+  ): Promise<PayoutFile | undefined> {
+    const existingId = this.idempotency.get(`${clientId}:file:${key}`);
+    if (existingId) {
+      return withoutContent(this.files.get(existingId)!);
+    }
+    const ready = Array.from(this.payouts.values()).filter(
+      (p) => p.clientId === clientId && !p.fileId && p.debitStatus === "POSTED",
+    );
+    if (!ready.length) return undefined;
+    const fileId = randomUUID();
+    const generation =
+      Array.from(this.files.values()).filter((f) => f.clientId === clientId)
+        .length + 1;
+    const items = ready.map((p) => ({
+      reference: p.id,
+      branch: p.branch,
+      account: p.bankAccount,
+      amountMinor: p.amountMinor,
+      holder: p.holder,
+    }));
+    const content = build({ fileId, generation, items });
+    const parsed = parseEft(content);
+    const amountTotal = parsed.items.reduce((s, i) => s + i.amountMinor, 0);
+    const status =
+      amountTotal >= thresholdCents ? "AWAITING_APPROVAL" : "GENERATED";
+    const file: StoredPayoutFile = {
+      id: fileId,
+      clientId,
+      generation,
+      actionDate,
+      itemCount: parsed.items.length,
+      amountTotal,
+      hashTotal: Number(hashTotal(parsed.items)),
+      sha256: sha256(content),
+      status,
+      createdAt: new Date().toISOString(),
+      content,
+      createdBy: createdBy ?? null,
+      approvedBy: null,
+      approvedAt: null,
+    };
+    for (const p of ready) {
+      p.fileId = fileId;
+      p.status = "IN_FILE";
+    }
+    this.files.set(fileId, file);
+    this.idempotency.set(`${clientId}:file:${key}`, fileId);
+    return withoutContent(file);
+  }
+
+  async listPayoutFiles(clientId: string): Promise<PayoutFile[]> {
+    return Array.from(this.files.values())
+      .filter((f) => f.clientId === clientId)
+      .map(withoutContent);
+  }
+
+  async payoutFile(
+    clientId: string,
+    id: string,
+  ): Promise<StoredPayoutFile | undefined> {
+    const file = this.files.get(id);
+    return file && file.clientId === clientId ? { ...file } : undefined;
+  }
+
+  async approvePayoutFile(
+    clientId: string,
+    id: string,
+    approver: string,
+  ): Promise<PayoutFile> {
+    const file = this.files.get(id);
+    if (!file || file.clientId !== clientId) {
+      throw new NotFound("Payout file not found");
+    }
+    if (file.createdBy && file.createdBy === approver) {
+      throw new Forbidden("Creator cannot approve payout file");
+    }
+    if (file.status === "AWAITING_APPROVAL") {
+      file.status = "GENERATED";
+      file.approvedBy = approver;
+      file.approvedAt = new Date().toISOString();
+    }
+    return withoutContent(file);
+  }
+
+  async markSubmission(
+    clientId: string,
+    id: string,
+    status: "SUBMITTED" | "SUBMISSION_UNKNOWN",
+  ): Promise<void> {
+    const file = this.files.get(id);
+    if (file && file.clientId === clientId) {
+      file.status = status;
+      this.submissions.push(status);
+    }
+  }
+
+  async importBankResponse(
+    clientId: string,
+    response: BankResponse,
+    _content: string,
+  ): Promise<ImportResult> {
+    const file = this.files.get(response.fileId);
+    if (!file || file.clientId !== clientId) {
+      throw new NotFound("The response names an unknown payout file");
+    }
+    file.status =
+      response.status === "ACCEPTED" ? "RESPONSE_PROCESSED" : "REJECTED";
+    return {
+      fileId: response.fileId,
+      status: file.status,
+      duplicate: false,
+      paid: response.results.filter((r) => r.outcome === "PAID").length,
+      returned: response.results.filter((r) => r.outcome === "RETURNED").length,
+    };
+  }
+
+  async scanPayouts(clientId: string) {
+    return {
+      payouts: await this.listPayouts(clientId),
+      files: Array.from(this.files.values()).filter((f) => f.clientId === clientId),
+      truncated: false,
     };
   }
 }

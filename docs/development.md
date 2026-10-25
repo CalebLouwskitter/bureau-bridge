@@ -48,6 +48,7 @@ The modern app accepts these usernames with `DEMO_PASSWORD`:
 | `insurer-admin` | Submit allocations and view the insurer's register                           |
 | `employee-one`  | Read only allocations to `EMP000000001`                                      |
 | `ops`           | Submit, inspect, inquire against the core, and verify/resume unresolved work |
+| `ops-two`       | Operations user for maker-checker dual control and payout file approvals    |
 
 The authentication is an explicit local demo implementation with signed one-hour sessions. A real identity provider is a future deployment task. The PHP server is its development server, intended for this local lab.
 
@@ -128,7 +129,7 @@ The initial account master contains R100,000 in `INS000000001`, zero in two acti
 
 SQL Server holds process state only. It never becomes another writable balance ledger. The worker claims jobs with a time-limited lease; a replaced lease token cannot finalize a newer worker's job. Transient failures back off, then move to **Needs review** after six consecutive failures. A timeout never becomes **Posted internally**.
 
-The fixed-width contract is documented in [file-contract.md](file-contract.md). The worker refreshes read-only account projections every 30 seconds and persists a cross-system reconciliation observation every 300 seconds. Configure `ACCOUNT_SYNC_SECONDS` and `RECONCILE_SECONDS` in `.env`. Balances show the committed core timestamp and generation; SQL Server never independently adjusts them. Older source sequences cannot replace newer projections.
+The fixed-width contract is documented in [file-contract.md](file-contract.md). The worker refreshes read-only account projections every 30 seconds and persists a cross-system reconciliation observation every 300 seconds. Configure `ACCOUNT_SYNC_SECONDS`, `RECONCILE_SECONDS`, and `PAYOUT_APPROVAL_THRESHOLD_CENTS` (default `5000000`, i.e. R50,000) in `.env`. Payout files at or above the threshold enter `AWAITING_APPROVAL` and require maker-checker approval by a different operations user before submission. Balances show the committed core timestamp and generation; SQL Server never independently adjusts them. Older source sequences cannot replace newer projections.
 
 Operations users can run a comparison from the Expo app and inspect payload/outcome mismatches, missing core references, pending imports, batch count/amount controls, and seed-plus-journal balance differences. PHP portal entries appear as informational `LEGACY_ONLY` work. A comparison can overlap an in-progress import, so findings are observations to investigate; scanning does not repost or repair money automatically. Each layer is limited to 5000 records in this demo. An incomplete scan is explicitly flagged and cannot claim a clean reconciliation.
 
@@ -153,6 +154,7 @@ The PHP portal exports request and batch-control CSVs. Operations users can expo
 | POST   | `/payout-files`              | Operations-only EFT file generation with `Idempotency-Key` |
 | GET    | `/payout-files`              | Operations-only file list                     |
 | GET    | `/payout-files/:id/eft.txt`  | Operations-only stored file bytes with a SHA-256 header |
+| POST   | `/payout-files/:id/approve`  | Operations-only maker-checker approval for files at/above threshold |
 | POST   | `/payout-files/:id/submit`   | Operations-only ask-then-send to the demo bank, then response import |
 | POST   | `/bank-responses`            | Operations-only `text/plain` response import; repeats report `duplicate` |
 
