@@ -169,6 +169,8 @@ Except health and sign-in, send `Authorization: Bearer <session token>`. The sha
 
 The internal PHP endpoints use a distinct bridge credential for intake/status and an operations credential for inquiry/recovery. The mobile app never receives either credential or database access.
 
+EFT action dates follow the South African business-day calendar (statutory public holidays under the Public Holidays Act 36 of 1994, Easter-derived Good Friday and Family Day, and Sunday-to-Monday shifts). Files created on weekends, holidays, or after the daily cut-off roll to the next business day. Configure `PAYOUT_CUTOFF` in `.env` (default `15:00` in `Africa/Johannesburg`).
+
 Authenticated bridge reads at `/v1/accounts` and `/v1/reconciliation` expose committed balances and the intake/core inventory. Operator Basic authentication protects `/reports/requests.csv` and `/reports/batches.csv`; the portal's modifying forms also require a session form token.
 
 ## Checks
