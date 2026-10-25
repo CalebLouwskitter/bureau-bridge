@@ -30,7 +30,7 @@ type Tab = "home" | "allocate" | "activity" | "operations";
 
 export function BureauApp() {
   const b = useBureau();
-  const { mode, palette: p, toggle } = useAppearance();
+  const { mode, palette: p, toggle, reducedMotion } = useAppearance();
   const insets = useSafeAreaInsets();
   const [tab, setTab] = useState<Tab>("home");
   const scroll = useRef<ScrollView>(null);
@@ -47,8 +47,8 @@ export function BureauApp() {
   ];
 
   useEffect(() => {
-    scroll.current?.scrollTo({ y: 0, animated: false });
-  }, [tab, b.message, b.token]);
+    scroll.current?.scrollTo({ y: 0, animated: !reducedMotion });
+  }, [tab, b.message, b.token, reducedMotion]);
 
   function signOut() {
     if (b.busy) return;
