@@ -13,7 +13,7 @@ A financial systems portfolio project connecting PHP and a real COBOL core to Ty
 [![PHP](https://img.shields.io/badge/PHP-777BB4?style=flat-square&logo=php&logoColor=white)](legacy/php)
 [![Expo](https://img.shields.io/badge/Expo-000020?style=flat-square&logo=expo&logoColor=white)](apps/mobile)
 
-[Architecture](docs/architecture.md) · [Run the demo](#run-the-demo) · [Recovery walkthrough](#the-demo-to-try-first) · [EFT payouts](#pay-out-by-eft) · [Talking points](docs/talking-points.md) · [Validation evidence](docs/validation.md)
+[Architecture](docs/architecture.md) · [Run the demo](#run-the-demo) · [Recovery walkthrough](#the-demo-to-try-first) · [EFT payouts](#pay-out-by-eft) · [Performance](docs/performance.md) · [Talking points](docs/talking-points.md) · [Validation evidence](docs/validation.md)
 
 </div>
 

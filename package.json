@@ -21,7 +21,9 @@
     "web": "npm run web --workspace @bureau/mobile",
     "smoke": "node --env-file=.env scripts/smoke.mjs",
     "test:mobile:web": "node scripts/test-mobile-ui.mjs",
-    "demo:payouts": "node --env-file=.env scripts/demo-payouts.mjs"
+    "demo:payouts": "node --env-file=.env scripts/demo-payouts.mjs",
+    "load": "node --env-file=.env scripts/load/allocations.mjs",
+    "load:replay": "node --env-file=.env scripts/load/allocations.mjs --replay"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",
