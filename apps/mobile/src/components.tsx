@@ -3,7 +3,7 @@ import { Button, Text, XStack, YStack } from "tamagui";
 import { CheckCircle2, Clock3, AlertTriangle } from "lucide-react-native";
 import { type Allocation, type Status } from "@bureau/contracts";
 import { useAppearance } from "./AppearanceProvider";
-import { accountName, money, statusLabels, timestamp } from "./presentation";
+import { accountName, formatAmountForSpeech, money, statusLabels, timestamp } from "./presentation";
 
 export function Card({
   children,
@@ -77,11 +77,16 @@ export function ActionButton({
   label?: string;
   testID?: string;
 }) {
+  const accessibleName = label ?? children;
   return (
     <Button
       testID={testID}
-      accessibilityLabel={label}
-      aria-label={label}
+      accessibilityRole="button"
+      role="button"
+      accessibilityLabel={accessibleName}
+      aria-label={accessibleName}
+      accessibilityState={{ disabled: !!disabled }}
+      aria-disabled={disabled}
       onPress={onPress}
       disabled={disabled}
       icon={icon}
@@ -111,17 +116,27 @@ export function TextAction({
   children,
   onPress,
   disabled,
+  label,
 }: {
   children: string;
   onPress: () => void;
   disabled?: boolean;
+  label?: string;
 }) {
+  const accessibleName = label ?? children;
   return (
     <Button
       chromeless
+      accessibilityRole="button"
+      role="button"
+      accessibilityLabel={accessibleName}
+      aria-label={accessibleName}
+      accessibilityState={{ disabled: !!disabled }}
+      aria-disabled={disabled}
       onPress={onPress}
       disabled={disabled}
       minHeight={44}
+      minWidth={44}
       height="auto"
       paddingHorizontal={8}
       paddingVertical={10}
@@ -185,7 +200,13 @@ export function AllocationSummary({ allocation }: { allocation: Allocation }) {
             {timestamp(allocation.updatedAt)}
           </Body>
         </YStack>
-        <Text color="$color" fontSize={20} lineHeight={27} fontWeight="600">
+        <Text
+          color="$color"
+          fontSize={20}
+          lineHeight={27}
+          fontWeight="600"
+          accessibilityLabel={formatAmountForSpeech(allocation.amountMinor)}
+        >
           {money(allocation.amountMinor)}
         </Text>
       </XStack>

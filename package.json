@@ -24,6 +24,7 @@
     "demo:payouts": "node --env-file=.env scripts/demo-payouts.mjs"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.14.0",
     "@playwright/test": "^1.62.1",
     "prettier": "3.6.2"
   }

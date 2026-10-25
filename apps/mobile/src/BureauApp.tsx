@@ -30,7 +30,7 @@ type Tab = "home" | "allocate" | "activity" | "operations";
 
 export function BureauApp() {
   const b = useBureau();
-  const { mode, palette: p, toggle } = useAppearance();
+  const { mode, palette: p, toggle, reducedMotion } = useAppearance();
   const insets = useSafeAreaInsets();
   const [tab, setTab] = useState<Tab>("home");
   const scroll = useRef<ScrollView>(null);
@@ -47,8 +47,8 @@ export function BureauApp() {
   ];
 
   useEffect(() => {
-    scroll.current?.scrollTo({ y: 0, animated: false });
-  }, [tab, b.message, b.token]);
+    scroll.current?.scrollTo({ y: 0, animated: !reducedMotion });
+  }, [tab, b.message, b.token, reducedMotion]);
 
   function signOut() {
     if (b.busy) return;
@@ -67,6 +67,7 @@ export function BureauApp() {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
         <XStack
+          role="banner"
           width="100%"
           maxWidth={600}
           alignSelf="center"
@@ -148,6 +149,8 @@ export function BureauApp() {
         <ScrollView
           testID="screen-scroll"
           ref={scroll}
+          role="main"
+          aria-label="Main content"
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
           contentContainerStyle={{
@@ -182,8 +185,11 @@ export function BureauApp() {
                 padding={0}
                 borderRadius={12}
                 chromeless
+                accessibilityRole="button"
+                role="button"
                 accessibilityLabel="Dismiss message"
                 aria-label="Dismiss message"
+                focusStyle={{ outlineColor: "$accentStrong", outlineWidth: 2 }}
                 onPress={b.clearMessage}
               >
                 <X size={18} color={p.warning} aria-hidden />
@@ -212,6 +218,8 @@ export function BureauApp() {
         </ScrollView>
         {!!b.token && (
           <YStack
+            accessibilityRole="toolbar"
+            aria-label="Bottom navigation"
             backgroundColor="$surface"
             borderTopWidth={1}
             borderTopColor="$borderColor"

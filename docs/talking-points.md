@@ -84,6 +84,7 @@ Bank files are where double payment really happens: a re-run job, a resend after
 - **Identity and secrets.** An OIDC identity provider in place of demo users. Secrets in a vault or HSM, rotated, never in `.env`.
 - **POPIA.** Bank details are personal information: encrypt at rest, mask in logs and UIs, limit retention, and log access.
 - **Observability.** One correlation ID carried API → outbox → PHP → batch manifest → core generation → bank file. Alerts on `VERIFYING` age, `SUBMISSION_UNKNOWN`, `NEEDS_REVIEW` and reconciliation `HIGH` findings.
+- **Physical device accessibility audits.** The client has a documented WCAG 2.2 AA pass with automated axe-core regression checks and phonetic currency speech ("R1 234,50" read as rand and cents), but production banking compliance requires physical TalkBack and VoiceOver audits on iOS and Android devices with Dynamic Type scaling.
 - **Operations.** Backups and restore drills for core generations, generation pruning, and DR. Load tests to find the real batch and file limits.
 - **Scale.** Replace the single-writer core with a partitioned ledger service. Use CDC instead of a polled outbox, and pick a broker with at-least-once delivery and consumer-side deduplication.
 

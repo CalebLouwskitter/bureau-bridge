@@ -5,7 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Platform } from "react-native";
+import { AccessibilityInfo, Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
@@ -19,13 +19,58 @@ const AppearanceContext = createContext<{
   mode: Appearance;
   palette: Palette;
   toggle: () => void;
-}>({ mode: "light", palette: palettes.light, toggle: () => {} });
+  reducedMotion: boolean;
+}>({
+  mode: "light",
+  palette: palettes.light,
+  toggle: () => {},
+  reducedMotion: false,
+});
 
 export function AppearanceProvider({ children }: React.PropsWithChildren) {
   const [mode, setMode] = useState<Appearance>("light");
+  const [reducedMotion, setReducedMotion] = useState(false);
   const selected = useRef(false);
   const current = useRef<Appearance>("light");
   const writes = useRef(Promise.resolve());
+
+  useEffect(() => {
+    let active = true;
+    void AccessibilityInfo.isReduceMotionEnabled()
+      .then((enabled) => {
+        if (active) setReducedMotion(enabled);
+      })
+      .catch(() => {});
+    const sub = AccessibilityInfo.addEventListener(
+      "reduceMotionChanged",
+      (enabled) => {
+        if (active) setReducedMotion(enabled);
+      },
+    );
+
+    if (
+      Platform.OS === "web" &&
+      typeof window !== "undefined" &&
+      window.matchMedia
+    ) {
+      const mql = window.matchMedia("(prefers-reduced-motion: reduce)");
+      if (mql.matches) setReducedMotion(true);
+      const listener = (e: MediaQueryListEvent) => {
+        if (active) setReducedMotion(e.matches);
+      };
+      mql.addEventListener?.("change", listener);
+      return () => {
+        active = false;
+        sub.remove();
+        mql.removeEventListener?.("change", listener);
+      };
+    }
+
+    return () => {
+      active = false;
+      sub.remove();
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -69,7 +114,9 @@ export function AppearanceProvider({ children }: React.PropsWithChildren) {
   return (
     <TamaguiProvider config={tamaguiConfig} defaultTheme={mode}>
       <SafeAreaProvider>
-        <AppearanceContext.Provider value={{ mode, palette, toggle }}>
+        <AppearanceContext.Provider
+          value={{ mode, palette, toggle, reducedMotion }}
+        >
           <StatusBar style={mode === "light" ? "dark" : "light"} />
           {children}
         </AppearanceContext.Provider>
