@@ -1,3 +1,10 @@
+<?php
+/**
+ * @var string $notice
+ * @var list<array<string, mixed>> $rows
+ * @var list<array<string, mixed>> $batches
+ */
+?>
 <!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>BureauBridge · legacy operations</title>
 <style>body{font:15px system-ui;background:#e7e9e7;color:#172b2b;margin:0}header{background:#183a3a;color:white;padding:24px 5%}main{max-width:1100px;margin:28px auto;padding:0 20px}section{background:white;border:1px solid #bbc9c5;padding:24px;margin-bottom:20px}h1{margin:0;font-size:24px}small{color:#c1ded6}label{display:inline-block;margin:0 18px 12px 0}input,select,button{padding:9px;border:1px solid #94aca3}button{background:#234f48;color:white;cursor:pointer}table{border-collapse:collapse;width:100%;font-size:13px}td,th{padding:12px 8px;border-bottom:1px solid #d9e2de;text-align:left}code{font-size:11px} .scroll{overflow:auto}.notice{color:#234f48}</style>

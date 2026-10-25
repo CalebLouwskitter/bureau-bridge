@@ -28,6 +28,10 @@ function uuid(): string {
     $hex = bin2hex($bytes);
     return substr($hex,0,8).'-'.substr($hex,8,4).'-'.substr($hex,12,4).'-'.substr($hex,16,4).'-'.substr($hex,20);
 }
+/**
+ * @param array<string, mixed> $data
+ * @return array<string, mixed>
+ */
 function allocation(array $data): array {
     $ref = $data['reference'] ?? '';
     if (!is_string($ref) || !preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/D', $ref))
@@ -45,6 +49,10 @@ function allocation(array $data): array {
     return ['reference'=>$ref, 'sourceAccount'=>$data['sourceAccount'],
         'targetAccount'=>$data['targetAccount'], 'amountMinor'=>$amount, 'currency'=>'ZAR'];
 }
+/**
+ * @param array<string, mixed> $data
+ * @return array<string, mixed>
+ */
 function intake(array $data): array {
     $row = allocation($data);
     $hash = hash('sha256', json_encode($row, JSON_THROW_ON_ERROR));
@@ -54,15 +62,25 @@ function intake(array $data): array {
     } catch (PDOException $e) {
         if (($e->errorInfo[1] ?? 0) !== 1062) throw $e;
         $existing = lookup($row['reference']);
-        if (!hash_equals($existing['fingerprint'], $hash)) throw new DomainException('Reference already belongs to different request data');
+        if (!$existing || !hash_equals($existing['fingerprint'], $hash)) throw new DomainException('Reference already belongs to different request data');
     }
-    return public_row(lookup($row['reference']));
+    $created = lookup($row['reference']);
+    if (!$created) throw new RuntimeException('Failed to retrieve created request');
+    return public_row($created);
 }
+/**
+ * @return array<string, mixed>|null
+ */
 function lookup(string $ref): ?array {
     $stmt = db()->prepare('SELECT * FROM requests WHERE reference=?');
     $stmt->execute([$ref]);
-    return $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return is_array($row) ? $row : null;
 }
+/**
+ * @param array<string, mixed> $row
+ * @return array<string, mixed>
+ */
 function public_row(array $row): array {
     return ['reference'=>$row['reference'],'sourceAccount'=>$row['source_account'],
         'targetAccount'=>$row['target_account'],'amountMinor'=>(int)$row['amount_minor'],
@@ -71,6 +89,9 @@ function public_row(array $row): array {
         'createdAt'=>str_replace(' ','T',$row['created_at']).'Z',
         'updatedAt'=>str_replace(' ','T',$row['updated_at']).'Z'];
 }
+/**
+ * @param array<string, mixed> $row
+ */
 function record_line(array $row): string {
     return $row['reference'].$row['source_account'].$row['target_account'].
         str_pad((string)$row['amount_minor'],12,'0',STR_PAD_LEFT).$row['currency']."\n";
@@ -84,6 +105,9 @@ function durable_write(string $path, string $contents): void {
     fclose($file);
     if (!rename($temp,$path)) throw new RuntimeException('Cannot publish batch file');
 }
+/**
+ * @return array<string, mixed>
+ */
 function core_run(string $mode, ?string $input = null): array {
     $command = ['python3',config('CORE_RUNNER','/app/core-runner.py'),$mode];
     if ($input !== null) $command[] = $input;
@@ -94,17 +118,25 @@ function core_run(string $mode, ?string $input = null): array {
     $output = stream_get_contents($pipes[1]);
     $error = stream_get_contents($pipes[2]);
     fclose($pipes[1]); fclose($pipes[2]);
-    if (proc_close($process) !== 0) { error_log($error); throw new RuntimeException('Core outcome requires verification'); }
-    return json_decode($output,true,512,JSON_THROW_ON_ERROR);
+    if (proc_close($process) !== 0) { error_log($error !== false ? $error : ''); throw new RuntimeException('Core outcome requires verification'); }
+    if ($output === false) throw new RuntimeException('Failed to read core output');
+    $decoded = json_decode($output,true,512,JSON_THROW_ON_ERROR);
+    if (!is_array($decoded)) throw new RuntimeException('Invalid core output format');
+    return $decoded;
 }
+/**
+ * @param array<string, mixed> $result
+ */
 function import_result(array $result): void {
     db()->beginTransaction();
     try {
-        foreach ($result['records'] as $record) {
+        /** @var list<array<string, mixed>> $records */
+        $records = $result['records'] ?? [];
+        foreach ($records as $record) {
             $stmt = db()->prepare('SELECT * FROM requests WHERE reference=? FOR UPDATE');
             $stmt->execute([$record['reference']]);
             $row = $stmt->fetch(PDO::FETCH_ASSOC);
-            if (!$row || $row['source_account'] !== $record['sourceAccount'] ||
+            if (!is_array($row) || $row['source_account'] !== $record['sourceAccount'] ||
                 $row['target_account'] !== $record['targetAccount'] || (int)$row['amount_minor'] !== $record['amountMinor'] ||
                 $row['currency'] !== $record['currency']) throw new RuntimeException('Result differs from request');
             if (!in_array($record['status'],['POSTED','DECLINED','NOTFOUND'],true)) throw new RuntimeException('Unrecognized core result');
@@ -120,6 +152,9 @@ function import_result(array $result): void {
         db()->commit();
     } catch (Throwable $e) { db()->rollBack(); throw $e; }
 }
+/**
+ * @return array<string, mixed>
+ */
 function inquiry(string $ref): array {
     $row = lookup($ref);
     if (!$row) throw new OutOfBoundsException('Request not found');
@@ -129,10 +164,12 @@ function inquiry(string $ref): array {
     durable_write($path,record_line($row));
     $result = core_run('QUERY',$path);
     import_result($result);
-    if ($row['batch_id']) reconcile_batch($row['batch_id']);
+    if (!empty($row['batch_id'])) reconcile_batch((string)$row['batch_id']);
     $stmt = db()->prepare('INSERT INTO inquiries (id,reference,outcome) VALUES (?,?,?)');
     $stmt->execute([uuid(),$ref,$result['records'][0]['status']]);
-    return ['request'=>public_row(lookup($ref)),'coreOutcome'=>$result['records'][0]['status']];
+    $updated = lookup($ref);
+    if (!$updated) throw new RuntimeException('Failed to retrieve updated request');
+    return ['request'=>public_row($updated),'coreOutcome'=>$result['records'][0]['status']];
 }
 function reconcile_batch(string $id): void {
     $stmt=db()->prepare("UPDATE batch_runs b SET status='RECONCILED' WHERE id=?
@@ -142,6 +179,9 @@ function reconcile_batch(string $id): void {
             WHERE i.batch_id=? AND r.status NOT IN ('POSTED','DECLINED'))");
     $stmt->execute([$id,$id]);
 }
+/**
+ * @return array<string, mixed>
+ */
 function retry_unposted(string $ref): array {
     $dir=config('EXCHANGE_ROOT','/data/exchange');
     if (!is_dir($dir)) mkdir($dir,0770,true);
@@ -152,9 +192,14 @@ function retry_unposted(string $ref): array {
         if ($result['coreOutcome']==='NOTFOUND') {
             db()->prepare("UPDATE requests SET status='RECEIVED',reason=NULL WHERE reference=? AND status NOT IN ('POSTED','DECLINED')")->execute([$ref]);
         }
-        return public_row(lookup($ref));
+        $updated = lookup($ref);
+        if (!$updated) throw new RuntimeException('Failed to retrieve request');
+        return public_row($updated);
     } finally { flock($lock,LOCK_UN); fclose($lock); }
 }
+/**
+ * @return array<string, mixed>
+ */
 function batch(bool $dropResult = false): array {
     $dir = config('EXCHANGE_ROOT','/data/exchange');
     if (!is_dir($dir)) mkdir($dir,0770,true);
@@ -162,7 +207,9 @@ function batch(bool $dropResult = false): array {
     if (!$lock || !flock($lock,LOCK_EX)) throw new RuntimeException('Cannot acquire batch lock');
     try {
         db()->beginTransaction();
-        $rows = db()->query("SELECT * FROM requests WHERE status='RECEIVED' ORDER BY created_at,reference LIMIT 100 FOR UPDATE")->fetchAll(PDO::FETCH_ASSOC);
+        $query = db()->query("SELECT * FROM requests WHERE status='RECEIVED' ORDER BY created_at,reference LIMIT 100 FOR UPDATE");
+        if ($query === false) throw new RuntimeException('Cannot query received requests');
+        $rows = $query->fetchAll(PDO::FETCH_ASSOC);
         if (!$rows) { db()->commit(); return ['records'=>0]; }
         $id = uuid(); $data = ''; $total = 0;
         foreach ($rows as $row) { $data .= record_line($row); $total += (int)$row['amount_minor']; }
@@ -180,7 +227,8 @@ function batch(bool $dropResult = false): array {
         }
         db()->commit();
         try {
-            if (!hash_equals($checksum,hash_file('sha256',$dir.'/'.$id.'.dat')))
+            $fileHash = hash_file('sha256',$dir.'/'.$id.'.dat');
+            if ($fileHash === false || !hash_equals($checksum,$fileHash))
                 throw new RuntimeException('Batch checksum changed before core delivery');
             $result = core_run('POST',$dir.'/'.$id.'.dat');
             if ($dropResult) throw new RuntimeException('Injected missing result after core commit');
@@ -199,8 +247,11 @@ function batch(bool $dropResult = false): array {
     }
 }
 
+/**
+ * @return list<array<string, mixed>>
+ */
 function batch_controls(): array {
-    $rows = db()->query("SELECT b.*,
+    $query = db()->query("SELECT b.*,
         COUNT(i.reference) AS submitted_count,COALESCE(SUM(i.amount_minor),0) AS submitted_total,
         COALESCE(SUM(r.status IN ('POSTED','DECLINED')),0) AS terminal_count,
         COALESCE(SUM(r.status='POSTED'),0) AS posted_count,
@@ -210,7 +261,9 @@ function batch_controls(): array {
         FROM batch_runs b LEFT JOIN batch_items i ON i.batch_id=b.id
         LEFT JOIN requests r ON r.reference=i.reference
         GROUP BY b.id,b.record_count,b.amount_total,b.checksum,b.status,b.created_at
-        ORDER BY b.created_at DESC,b.id LIMIT 5001")->fetchAll(PDO::FETCH_ASSOC);
+        ORDER BY b.created_at DESC,b.id LIMIT 5001");
+    if ($query === false) throw new RuntimeException('Cannot query batch controls');
+    $rows = $query->fetchAll(PDO::FETCH_ASSOC);
     return array_map(function(array $r): array {
         $numeric = ['record_count','amount_total','submitted_count','submitted_total',
             'terminal_count','posted_count','declined_count','posted_total','declined_total'];
@@ -220,22 +273,35 @@ function batch_controls(): array {
         return $r;
     },$rows);
 }
+/**
+ * @return array<string, mixed>
+ */
 function reconciliation_inventory(): array {
     db()->beginTransaction();
     try {
-        $requests = db()->query('SELECT * FROM requests ORDER BY reference LIMIT 5001')->fetchAll(PDO::FETCH_ASSOC);
+        $query = db()->query('SELECT * FROM requests ORDER BY reference LIMIT 5001');
+        if ($query === false) throw new RuntimeException('Cannot query requests for inventory');
+        $requests = $query->fetchAll(PDO::FETCH_ASSOC);
         $batches = batch_controls();
         $core = core_run('AUDIT');
         db()->commit();
         return ['requests'=>array_map('public_row',array_slice($requests,0,5000)),
             'batches'=>array_slice($batches,0,5000), 'core'=>$core,
-            'truncated'=>count($requests)>5000 || count($batches)>5000 || $core['truncated']];
+            'truncated'=>count($requests)>5000 || count($batches)>5000 || !empty($core['truncated'])];
     } catch (Throwable $e) { db()->rollBack(); throw $e; }
 }
+/**
+ * @param list<string> $columns
+ * @param list<list<mixed>>|list<array<string, mixed>> $rows
+ */
 function csv_text(array $columns, array $rows): string {
     $stream = fopen('php://temp','w+');
+    if ($stream === false) throw new RuntimeException('Cannot open temporary stream');
     $safe = static fn(mixed $v): string => preg_match('/^[=+@\t\r-]/',(string)$v) ? "'".(string)$v : (string)$v;
     fputcsv($stream,array_map($safe,$columns),',','"','');
     foreach ($rows as $row) fputcsv($stream,array_map($safe,$row),',','"','');
-    rewind($stream); $text = stream_get_contents($stream); fclose($stream); return $text;
+    rewind($stream);
+    $text = stream_get_contents($stream);
+    fclose($stream);
+    return $text !== false ? $text : '';
 }

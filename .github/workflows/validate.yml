@@ -25,3 +25,16 @@ jobs:
         run: docker compose logs --no-color
       - if: always()
         run: docker compose down
+  php-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+      - working-directory: legacy/php
+        run: composer install
+      - working-directory: legacy/php
+        run: vendor/bin/phpstan analyse
+      - working-directory: legacy/php
+        run: vendor/bin/phpunit

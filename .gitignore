@@ -12,3 +12,5 @@ data/
 coverage/
 test-results/
 playwright-report/
+vendor/
+.phpunit.cache/
