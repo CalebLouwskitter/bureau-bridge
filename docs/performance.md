@@ -1,6 +1,6 @@
 # Performance and Load Testing
 
-A measured performance analysis of BureauBridge under concurrent load, covering the end-to-end journey from modern API acceptance, through the SQL Server outbox, legacy PHP intake, and the GnuCOBOL batch core.
+The method and tooling for measuring BureauBridge under concurrent load. **No results have been recorded yet**, because the stack hasn't been run on a machine with Docker; see the note below. The method covers the end-to-end journey from modern API acceptance, through the SQL Server outbox, legacy PHP intake, and the GnuCOBOL batch core.
 
 ---
 
