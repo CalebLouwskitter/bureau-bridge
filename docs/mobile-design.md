@@ -15,7 +15,7 @@ First launch uses **light mode**, including when the device prefers dark mode. T
 | Mint accent | `#8DE4BD` | `#8DE4BD` |
 | Text on mint | `#122E22` | `#122E22` |
 
-Semantic warning, decline, and posted colours also adapt to appearance. Every allocation status has a text label. System fonts scale with the device; controls use at least 44-point targets, visible focus styles, and accessible names. Safe-area insets protect the bottom tabs, and the iOS keyboard follows the selected appearance.
+Semantic warning, decline, and posted colours also adapt to appearance. Every allocation status has a text label. System fonts scale with the device; controls use at least 44-point targets, visible focus styles, and accessible names. Money values provide phonetic labels ("1 234 rand and 50 cents") for screen readers, and animations respect system reduced motion. Safe-area insets protect the bottom tabs, and the iOS keyboard follows the selected appearance.
 
 ## Views
 
@@ -42,6 +42,8 @@ The form persists an unfinished request **before transmission**. A failed send l
 | `apps/mobile/src/components.tsx` | Shared cards, controls, typography and status badges |
 | `apps/mobile/src/useBureau.ts` | Sessions, API actions, polling and retry persistence |
 | `tests/mobile/app.spec.ts` | Browser interaction checks against an isolated API fixture |
+| `tests/mobile/a11y.spec.ts` | Automated axe audits and pressable role/name assertions across roles and appearances |
+| `docs/accessibility.md` | WCAG 2.2 AA audit, remediation details and contrast logs |
 
 ## Local checks and captures
 
