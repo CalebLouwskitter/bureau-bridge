@@ -178,6 +178,23 @@ npm run typecheck
 npm test
 ```
 
+### Legacy PHP quality gates
+
+The legacy PHP boundary uses PHPStan for static analysis and PHPUnit for unit tests in `legacy/php/`. The runtime image remains standalone without Composer dependencies, while dev tooling is run via Composer:
+
+```bash
+cd legacy/php
+composer install
+vendor/bin/phpstan analyse
+vendor/bin/phpunit
+```
+
+To run PHP syntax checks across all legacy and integration files from the repository root:
+
+```bash
+for file in legacy/php/*.php tests/*.php; do php -l "$file"; done
+```
+
 On Linux with `gnucobol` installed:
 
 ```bash
