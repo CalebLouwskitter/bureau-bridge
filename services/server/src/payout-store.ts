@@ -18,6 +18,7 @@ import {
   type FileDraft,
   type ImportResult,
   type PayoutStore,
+  type StoredBankResponse,
   type StoredPayoutFile,
 } from "./payouts.ts";
 
@@ -418,18 +419,37 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
   async scanPayouts(clientId: string) {
     const request = () =>
       this.pool.request().input("client", sql.VarChar(30), clientId);
-    const [payouts, files] = await Promise.all([
+    const [payouts, files, responses] = await Promise.all([
       request().query(`${PAYOUT_SELECT} WHERE i.ClientId=@client
         ORDER BY i.Id OFFSET 0 ROWS FETCH NEXT 5001 ROWS ONLY`),
       request().query(
         "SELECT TOP (5001) * FROM dbo.PayoutFiles WHERE ClientId=@client ORDER BY Generation",
       ),
+      request().query(
+        `SELECT TOP (5001) b.PayoutFileId,b.Sha256,b.Status,b.Content,b.ReceivedAt
+         FROM dbo.BankResponses b JOIN dbo.PayoutFiles f ON f.Id=b.PayoutFileId
+         WHERE f.ClientId=@client ORDER BY b.ReceivedAt`,
+      ),
     ]);
     return {
       payouts: payouts.recordset.slice(0, 5000).map(mapPayout),
       files: files.recordset.slice(0, 5000).map(mapFile),
+      bankResponses: responses.recordset.slice(0, 5000).map(
+        (r: any): StoredBankResponse => ({
+          payoutFileId: r.PayoutFileId,
+          sha256: r.Sha256,
+          status: r.Status,
+          content: r.Content,
+          receivedAt:
+            r.ReceivedAt instanceof Date
+              ? r.ReceivedAt.toISOString()
+              : String(r.ReceivedAt),
+        }),
+      ),
       truncated:
-        payouts.recordset.length > 5000 || files.recordset.length > 5000,
+        payouts.recordset.length > 5000 ||
+        files.recordset.length > 5000 ||
+        responses.recordset.length > 5000,
     };
   }
 }
@@ -437,6 +457,7 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
 export class MemoryPayoutStore implements PayoutStore {
   readonly payouts = new Map<string, Payout>();
   readonly files = new Map<string, StoredPayoutFile>();
+  readonly bankResponses = new Map<string, StoredBankResponse>();
   readonly idempotency = new Map<string, string>();
   readonly submissions: string[] = [];
 
@@ -585,14 +606,50 @@ export class MemoryPayoutStore implements PayoutStore {
   async importBankResponse(
     clientId: string,
     response: BankResponse,
-    _content: string,
+    content: string,
   ): Promise<ImportResult> {
     const file = this.files.get(response.fileId);
     if (!file || file.clientId !== clientId) {
       throw new NotFound("The response names an unknown payout file");
     }
+    const hash = sha256(content);
+    const existing = this.bankResponses.get(response.fileId);
+    if (existing) {
+      if (existing.sha256 !== hash) {
+        throw new Conflict(
+          "A different bank response was already processed for this file",
+        );
+      }
+      const items = Array.from(this.payouts.values()).filter(
+        (p) => p.fileId === file.id,
+      );
+      return {
+        fileId: response.fileId,
+        status: file.status as "RESPONSE_PROCESSED" | "REJECTED",
+        duplicate: true,
+        paid: items.filter((p) => p.bankOutcome === "PAID").length,
+        returned: items.filter((p) => p.bankOutcome === "RETURNED").length,
+      };
+    }
+    this.bankResponses.set(response.fileId, {
+      payoutFileId: response.fileId,
+      sha256: hash,
+      status: response.status,
+      content,
+      receivedAt: new Date().toISOString(),
+    });
     file.status =
       response.status === "ACCEPTED" ? "RESPONSE_PROCESSED" : "REJECTED";
+    if (response.status === "ACCEPTED") {
+      for (const r of response.results) {
+        const p = this.payouts.get(r.reference);
+        if (p) {
+          p.bankOutcome = r.outcome;
+          p.returnCode = r.code;
+          p.status = payoutStatus(p);
+        }
+      }
+    }
     return {
       fileId: response.fileId,
       status: file.status,
@@ -603,9 +660,16 @@ export class MemoryPayoutStore implements PayoutStore {
   }
 
   async scanPayouts(clientId: string) {
+    const files = Array.from(this.files.values()).filter(
+      (f) => f.clientId === clientId,
+    );
+    const fileIds = new Set(files.map((f) => f.id));
     return {
       payouts: await this.listPayouts(clientId),
-      files: Array.from(this.files.values()).filter((f) => f.clientId === clientId),
+      files,
+      bankResponses: Array.from(this.bankResponses.values()).filter((r) =>
+        fileIds.has(r.payoutFileId),
+      ),
       truncated: false,
     };
   }

@@ -72,9 +72,15 @@ export interface AccountSnapshot {
   observedAt: string;
   balances: Omit<AccountProjection, "generation" | "sequence" | "observedAt">[];
 }
+export type VarianceCategory =
+  | "TIMING_GAP"
+  | "UNMATCHED_LEG"
+  | "AMOUNT_OR_HASH_MISMATCH"
+  | "INFO";
 export interface ReconciliationFinding {
   severity: "HIGH" | "WARN" | "INFO";
   code: string;
+  category?: VarianceCategory;
   reference: string | null;
   details: string;
 }

@@ -29,6 +29,13 @@ export function payoutApprovalThresholdCents(): number {
 export interface StoredPayoutFile extends PayoutFile {
   content: string;
 }
+export interface StoredBankResponse {
+  payoutFileId: string;
+  sha256: string;
+  status: "ACCEPTED" | "REJECTED";
+  content: string;
+  receivedAt: string;
+}
 export interface FileDraft {
   fileId: string;
   generation: number;
@@ -86,6 +93,7 @@ export interface PayoutStore {
   scanPayouts(clientId: string): Promise<{
     payouts: Payout[];
     files: StoredPayoutFile[];
+    bankResponses?: StoredBankResponse[];
     truncated: boolean;
   }>;
 }

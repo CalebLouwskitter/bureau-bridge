@@ -554,8 +554,8 @@ export class SqlStore implements Store {
         .input("id", sql.Char(36), run.id)
         .input("items", sql.NVarChar(sql.MAX), JSON.stringify(run.findings))
         .query(`INSERT dbo.ReconciliationFindings
-          (RunId,Severity,Code,Reference,Details) SELECT @id,severity,code,reference,details FROM OPENJSON(@items)
-          WITH (severity VARCHAR(8),code VARCHAR(48),reference CHAR(36),details NVARCHAR(1000));`);
+          (RunId,Severity,Code,Category,Reference,Details) SELECT @id,severity,code,category,reference,details FROM OPENJSON(@items)
+          WITH (severity VARCHAR(8),code VARCHAR(48),category VARCHAR(32),reference CHAR(36),details NVARCHAR(1000));`);
       await tx.commit();
     } catch (error) {
       await tx.rollback().catch(() => {});
@@ -577,7 +577,7 @@ export class SqlStore implements Store {
       .request()
       .input("id", sql.Char(36), r.Id)
       .query(
-        "SELECT Severity AS severity,Code AS code,Reference AS reference,Details AS details FROM dbo.ReconciliationFindings WHERE RunId=@id ORDER BY Id",
+        "SELECT Severity AS severity,Code AS code,Category AS category,Reference AS reference,Details AS details FROM dbo.ReconciliationFindings WHERE RunId=@id ORDER BY Id",
       );
     return {
       id: r.Id,
@@ -589,7 +589,13 @@ export class SqlStore implements Store {
       intakeCount: r.IntakeCount,
       coreCount: r.CoreCount,
       truncated: Boolean(r.Truncated),
-      findings: findings.recordset,
+      findings: findings.recordset.map((f: any) => ({
+        severity: f.severity,
+        code: f.code,
+        ...(f.category ? { category: f.category } : {}),
+        reference: f.reference,
+        details: f.details,
+      })),
     };
   }
 }

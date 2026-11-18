@@ -149,6 +149,7 @@ export function makeApp(
         legacy,
         request.principal!.clientId,
         options.payouts?.store,
+        createChildTraceparent(request.traceparent).raw,
       ),
     };
   });
