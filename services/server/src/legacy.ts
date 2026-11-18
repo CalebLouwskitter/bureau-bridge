@@ -1,4 +1,13 @@
 import { UUID, type Allocation, type AccountSnapshot } from "@bureau/contracts";
+import {
+  CircuitBreaker,
+  executeResilient,
+  LegacyHttpError,
+  LegacyInvariantError,
+  RetryBudget,
+  type CircuitBreakerOptions,
+  type RetryPolicyOptions,
+} from "./resilience.ts";
 export interface LegacyResult {
   reference: string;
   status: string;
@@ -48,18 +57,64 @@ export interface Legacy {
   accounts(opts?: LegacyCallOptions): Promise<AccountSnapshot>;
   inventory(opts?: LegacyCallOptions): Promise<LegacyInventory>;
 }
+export interface LegacyClientTimeouts {
+  lookup?: number;
+  submit?: number;
+  inquire?: number;
+  retry?: number;
+  accounts?: number;
+  inventory?: number;
+}
+export interface LegacyClientOptions {
+  timeouts?: LegacyClientTimeouts;
+  circuitBreaker?: CircuitBreaker | CircuitBreakerOptions;
+  retry?: RetryPolicyOptions;
+  fetch?: typeof globalThis.fetch;
+}
 export class LegacyClient implements Legacy {
+  readonly breaker: CircuitBreaker;
+  private readonly retryPolicy: RetryPolicyOptions;
+  private readonly timeouts: Required<LegacyClientTimeouts>;
+  private readonly fetchFn: typeof globalThis.fetch;
+
   constructor(
     private base: string,
     private bridgeKey: string,
     private opsKey?: string,
-  ) {}
+    options: LegacyClientOptions = {},
+  ) {
+    this.breaker =
+      options.circuitBreaker instanceof CircuitBreaker
+        ? options.circuitBreaker
+        : new CircuitBreaker({
+            failureThreshold: 5,
+            halfOpenAfterMs: 30_000,
+            ...options.circuitBreaker,
+          });
+    this.retryPolicy = {
+      maxAttempts: 3,
+      baseDelayMs: 150,
+      maxDelayMs: 2_000,
+      budget: options.retry?.budget ?? new RetryBudget(),
+      ...options.retry,
+    };
+    this.timeouts = {
+      lookup: options.timeouts?.lookup ?? 4_000,
+      submit: options.timeouts?.submit ?? 8_000,
+      inquire: options.timeouts?.inquire ?? 8_000,
+      retry: options.timeouts?.retry ?? 8_000,
+      accounts: options.timeouts?.accounts ?? 4_000,
+      inventory: options.timeouts?.inventory ?? 10_000,
+    };
+    this.fetchFn = options.fetch ?? globalThis.fetch;
+  }
   private async call(
     path: string,
     method = "GET",
     body?: unknown,
     ops = false,
     opts?: LegacyCallOptions,
+    timeoutMs = this.timeouts.lookup,
   ) {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${ops ? this.opsKey : this.bridgeKey}`,
@@ -68,18 +123,49 @@ export class LegacyClient implements Legacy {
     if (opts?.fencingToken !== undefined) {
       headers["X-Fencing-Token"] = String(opts.fencingToken);
     }
-    const response = await fetch(this.base + path, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(12000),
-    });
-    if (response.status === 404) return undefined;
-    if (!response.ok) throw new Error(`LEGACY_HTTP_${response.status}`);
-    return response.json();
+    const serializedBody = body !== undefined ? JSON.stringify(body) : undefined;
+    return executeResilient(
+      async (signal) => {
+        const response = await this.fetchFn(this.base + path, {
+          method,
+          headers,
+          body: serializedBody,
+          signal,
+        });
+        if (response.status === 404) return undefined;
+        if (!response.ok) {
+          let parsed: unknown;
+          try {
+            parsed = await response.json();
+          } catch {
+            parsed = undefined;
+          }
+          const code =
+            parsed &&
+            typeof parsed === "object" &&
+            typeof (parsed as { code?: unknown }).code === "string"
+              ? (parsed as { code: string }).code
+              : `LEGACY_HTTP_${response.status}`;
+          throw new LegacyHttpError(response.status, code, parsed);
+        }
+        return response.json();
+      },
+      {
+        timeoutMs,
+        breaker: this.breaker,
+        retry: this.retryPolicy,
+      },
+    );
   }
   async lookup(id: string, opts?: LegacyCallOptions) {
-    return this.call(`/v1/requests/${id}`, "GET", undefined, false, opts);
+    return this.call(
+      `/v1/requests/${id}`,
+      "GET",
+      undefined,
+      false,
+      opts,
+      this.timeouts.lookup,
+    );
   }
   async submit(a: Allocation, opts?: LegacyCallOptions) {
     const result = await this.call(
@@ -94,18 +180,40 @@ export class LegacyClient implements Legacy {
       },
       false,
       opts,
+      this.timeouts.submit,
     );
-    if (!result) throw new Error("LEGACY_SUBMIT_NOT_FOUND");
+    if (!result) throw new LegacyInvariantError("LEGACY_SUBMIT_NOT_FOUND");
     return result;
   }
   async inquire(id: string, opts?: LegacyCallOptions) {
-    return this.call(`/v1/requests/${id}/inquiry`, "POST", {}, true, opts);
+    return this.call(
+      `/v1/requests/${id}/inquiry`,
+      "POST",
+      {},
+      true,
+      opts,
+      this.timeouts.inquire,
+    );
   }
   async retryUnposted(id: string, opts?: LegacyCallOptions) {
-    return this.call(`/v1/requests/${id}/retry`, "POST", {}, true, opts);
+    return this.call(
+      `/v1/requests/${id}/retry`,
+      "POST",
+      {},
+      true,
+      opts,
+      this.timeouts.retry,
+    );
   }
   async accounts(opts?: LegacyCallOptions): Promise<AccountSnapshot> {
-    const data = await this.call("/v1/accounts", "GET", undefined, false, opts);
+    const data = await this.call(
+      "/v1/accounts",
+      "GET",
+      undefined,
+      false,
+      opts,
+      this.timeouts.accounts,
+    );
     if (
       !data ||
       typeof data.generation !== "string" ||
@@ -127,7 +235,7 @@ export class LegacyClient implements Legacy {
       new Set(data.balances.map((a: any) => a.account)).size !==
         data.balances.length
     )
-      throw new Error("LEGACY_INVALID_ACCOUNT_SNAPSHOT");
+      throw new LegacyInvariantError("LEGACY_INVALID_ACCOUNT_SNAPSHOT");
     return data;
   }
   async inventory(opts?: LegacyCallOptions): Promise<LegacyInventory> {
@@ -137,6 +245,7 @@ export class LegacyClient implements Legacy {
       undefined,
       false,
       opts,
+      this.timeouts.inventory,
     );
     const validRows = (rows: any) =>
       Array.isArray(rows) &&
@@ -170,7 +279,7 @@ export class LegacyClient implements Legacy {
           typeof b.control_match !== "boolean",
       )
     )
-      throw new Error("LEGACY_INVALID_RECONCILIATION");
+      throw new LegacyInvariantError("LEGACY_INVALID_RECONCILIATION");
     return data;
   }
 }

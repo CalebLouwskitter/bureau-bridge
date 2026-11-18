@@ -27,7 +27,8 @@ const allocation: Allocation = {
 };
 function fixture() {
   const outcomes: any[] = [],
-    retries: any[] = [];
+    retries: any[] = [],
+    deadLetters: any[] = [];
   const accounts = [
     {
       account: "EMP000000001",
@@ -52,6 +53,9 @@ function fixture() {
     },
     retry: async (_job, error) => {
       retries.push(error);
+    },
+    deadLetter: async (_job, error) => {
+      deadLetters.push(error);
     },
     wake: async () => {},
     accounts: async (_client, employee) => {
@@ -104,7 +108,7 @@ function fixture() {
       },
     }),
   };
-  return { store, legacy, result, outcomes, retries };
+  return { store, legacy, result, outcomes, retries, deadLetters };
 }
 test("lookup after a lost acknowledgment prevents a second submission", async () => {
   const f = fixture();
@@ -137,12 +141,13 @@ test("unknown reference can be submitted with original immutable id", async () =
   await tick(f.store, f.legacy);
   assert.equal(f.outcomes[0].status, "AWAITING_BATCH");
 });
-test("mismatched legacy amount requires review, not success", async () => {
+test("mismatched legacy amount immediately dead-letters for ops review, not retry or success", async () => {
   const f = fixture();
   f.legacy.lookup = async () => ({ ...f.result, amountMinor: 500 });
   await tick(f.store, f.legacy);
   assert.equal(f.outcomes.length, 0);
-  assert.equal(f.retries[0], "LEGACY_RESPONSE_MISMATCH");
+  assert.equal(f.retries.length, 0);
+  assert.equal(f.deadLetters[0], "LEGACY_RESPONSE_MISMATCH");
 });
 test("money contracts reject floating point amounts and unsupported account access", () => {
   assert.throws(() => parseAllocation({ ...allocation, amountMinor: 2.5 }));
