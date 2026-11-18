@@ -7,11 +7,104 @@ import {
   type Payout,
   type ReconciliationFinding,
   type ReconciliationRun,
+  type VarianceCategory,
 } from "@bureau/contracts";
 import type { Legacy, LegacyInventory, LegacyResult } from "./legacy.ts";
 import type { Store } from "./store.ts";
-import { parseEft, sha256 } from "./eft.ts";
-import type { PayoutStore, StoredPayoutFile } from "./payouts.ts";
+import {
+  parseAnyBankResponse,
+  parseAnyPaymentFile,
+  sha256,
+} from "./eft.ts";
+import type {
+  PayoutStore,
+  StoredBankResponse,
+  StoredPayoutFile,
+} from "./payouts.ts";
+
+const TIMING_GAP_CODES = new Set([
+  "MODERN_IMPORT_PENDING",
+  "LEGACY_IMPORT_PENDING",
+  "RETURN_CREDIT_PENDING",
+  "PAYOUT_AWAITING_FILE",
+  "BANK_SUBMISSION_UNKNOWN",
+  "BANK_RESPONSE_PENDING",
+  "SCAN_INCOMPLETE",
+]);
+
+const UNMATCHED_LEG_CODES = new Set([
+  "INTAKE_MISSING",
+  "MODERN_FINAL_WITHOUT_CORE",
+  "LEGACY_FINAL_WITHOUT_CORE",
+  "CORE_WITHOUT_INTAKE",
+  "PAYOUT_FILED_WITHOUT_DEBIT",
+  "SETTLEMENT_POSTING_OUTSIDE_HUB",
+  "BANK_RESPONSE_WITHOUT_FILE",
+  "FILE_PROCESSED_WITHOUT_BANK_RESPONSE",
+  "BANK_RESPONSE_UNMATCHED_ITEM",
+  "UNKNOWN_CORE_ACCOUNT",
+]);
+
+const AMOUNT_OR_HASH_MISMATCH_CODES = new Set([
+  "MODERN_INTAKE_PAYLOAD",
+  "MODERN_CORE_PAYLOAD",
+  "INTAKE_CORE_PAYLOAD",
+  "MODERN_CORE_OUTCOME",
+  "INTAKE_CORE_OUTCOME",
+  "INVALID_CORE_OUTCOME",
+  "DUPLICATE_REFERENCE",
+  "BATCH_CONTROL_MISMATCH",
+  "JOURNAL_BALANCE_MISMATCH",
+  "SETTLEMENT_BREAK",
+  "PAYOUT_FILE_ALTERED",
+  "PAYOUT_FILE_CONTROL_MISMATCH",
+  "BANK_RESPONSE_HASH_MISMATCH",
+  "BANK_RESPONSE_PARSE_ERROR",
+  "BANK_RESPONSE_OUTCOME_MISMATCH",
+  "THREE_WAY_TOTAL_MISMATCH",
+]);
+
+export function classifyVariance(code: string): VarianceCategory {
+  if (TIMING_GAP_CODES.has(code)) return "TIMING_GAP";
+  if (UNMATCHED_LEG_CODES.has(code)) return "UNMATCHED_LEG";
+  if (AMOUNT_OR_HASH_MISMATCH_CODES.has(code)) return "AMOUNT_OR_HASH_MISMATCH";
+  return "INFO";
+}
+
+export interface VarianceSummary {
+  timingGaps: number;
+  unmatchedLegs: number;
+  amountOrHashMismatches: number;
+  info: number;
+  highSeverity: number;
+  clean: boolean;
+}
+
+export function summarizeVariances(
+  findings: readonly ReconciliationFinding[],
+): VarianceSummary {
+  let timingGaps = 0;
+  let unmatchedLegs = 0;
+  let amountOrHashMismatches = 0;
+  let info = 0;
+  let highSeverity = 0;
+  for (const f of findings) {
+    if (f.severity === "HIGH") highSeverity++;
+    const cat = f.category ?? classifyVariance(f.code);
+    if (cat === "TIMING_GAP") timingGaps++;
+    else if (cat === "UNMATCHED_LEG") unmatchedLegs++;
+    else if (cat === "AMOUNT_OR_HASH_MISMATCH") amountOrHashMismatches++;
+    else info++;
+  }
+  return {
+    timingGaps,
+    unmatchedLegs,
+    amountOrHashMismatches,
+    info,
+    highSeverity,
+    clean: highSeverity === 0,
+  };
+}
 
 const final = (status: string) => ["POSTED", "DECLINED"].includes(status);
 const payloadMatches = (
@@ -37,7 +130,14 @@ export function compare(
     code: string,
     reference: string | null,
     details: string,
-  ) => findings.push({ severity, code, reference, details });
+  ) =>
+    findings.push({
+      severity,
+      code,
+      category: classifyVariance(code),
+      reference,
+      details,
+    });
   const incomplete =
     modernTruncated || legacy.truncated || legacy.core.truncated;
   if (incomplete)
@@ -234,6 +334,7 @@ const rand = (minor: number) => `R${(minor / 100).toFixed(2)}`;
 export interface PayoutScan {
   payouts: Payout[];
   files: StoredPayoutFile[];
+  bankResponses?: StoredBankResponse[];
   truncated: boolean;
 }
 // The payout leg's break report. Settlement holds value that left by EFT or
@@ -307,7 +408,9 @@ function comparePayouts(
     if (f.status === "REJECTED") continue;
     let lines;
     try {
-      lines = new Map(parseEft(f.content).items.map((i) => [i.reference, i]));
+      lines = new Map(
+        parseAnyPaymentFile(f.content).items.map((i) => [i.reference, i]),
+      );
     } catch {
       lines = new Map();
     }
@@ -323,7 +426,149 @@ function comparePayouts(
         `File generation ${f.generation}: ${lines.size} valid lines in the file; ${members.length} instructions claim it.`,
       );
   }
+  const filesById = new Map(scan.files.map((f) => [f.id, f]));
+  if (scan.bankResponses !== undefined) {
+    const responsesByFileId = new Map<string, StoredBankResponse>();
+    for (const br of scan.bankResponses) {
+      responsesByFileId.set(br.payoutFileId, br);
+      const file = filesById.get(br.payoutFileId);
+      if (!file) {
+        add(
+          "HIGH",
+          "BANK_RESPONSE_WITHOUT_FILE",
+          br.payoutFileId,
+          `Imported bank response references unknown payout file ${br.payoutFileId}.`,
+        );
+      }
+      if (sha256(br.content) !== br.sha256) {
+        add(
+          "HIGH",
+          "BANK_RESPONSE_HASH_MISMATCH",
+          br.payoutFileId,
+          `Imported bank response for file ${br.payoutFileId} does not match its recorded SHA-256 hash.`,
+        );
+      }
+      let parsedResp;
+      try {
+        parsedResp = parseAnyBankResponse(br.content);
+      } catch {
+        add(
+          "HIGH",
+          "BANK_RESPONSE_PARSE_ERROR",
+          br.payoutFileId,
+          `Imported bank response for file ${br.payoutFileId} could not be parsed.`,
+        );
+        continue;
+      }
+      if (
+        parsedResp.fileId !== br.payoutFileId ||
+        parsedResp.status !== br.status ||
+        (file && parsedResp.generation !== file.generation)
+      ) {
+        add(
+          "HIGH",
+          "BANK_RESPONSE_OUTCOME_MISMATCH",
+          br.payoutFileId,
+          `Imported bank response header disagrees with payout file ${br.payoutFileId}.`,
+        );
+      }
+      if (parsedResp.status === "ACCEPTED") {
+        const members = byFile.get(br.payoutFileId) ?? [];
+        const membersById = new Map(members.map((m) => [m.id, m]));
+        const seenInBank = new Set<string>();
+        for (const r of parsedResp.results) {
+          seenInBank.add(r.reference);
+          const inst = membersById.get(r.reference);
+          if (!inst) {
+            add(
+              "HIGH",
+              "BANK_RESPONSE_UNMATCHED_ITEM",
+              r.reference,
+              `Bank response for file ${br.payoutFileId} reports an item with no matching payout instruction.`,
+            );
+            continue;
+          }
+          if (inst.bankOutcome !== r.outcome || inst.returnCode !== r.code) {
+            add(
+              "HIGH",
+              "BANK_RESPONSE_OUTCOME_MISMATCH",
+              r.reference,
+              `Bank response reports ${r.outcome}${r.code ? ` (${r.code})` : ""} while payout instruction records ${inst.bankOutcome ?? "none"}.`,
+            );
+          }
+        }
+        for (const inst of members) {
+          if (!seenInBank.has(inst.id)) {
+            add(
+              "HIGH",
+              "BANK_RESPONSE_UNMATCHED_ITEM",
+              inst.id,
+              `Payout instruction in file ${br.payoutFileId} is absent from the imported bank response.`,
+            );
+          }
+        }
+      }
+    }
+    for (const f of scan.files) {
+      if (f.status === "SUBMITTED" && !responsesByFileId.has(f.id)) {
+        add(
+          "WARN",
+          "BANK_RESPONSE_PENDING",
+          f.id,
+          `File generation ${f.generation} has been submitted and is awaiting an imported bank response.`,
+        );
+      }
+      if (
+        (f.status === "RESPONSE_PROCESSED" || f.status === "REJECTED") &&
+        !responsesByFileId.has(f.id)
+      ) {
+        add(
+          "HIGH",
+          "FILE_PROCESSED_WITHOUT_BANK_RESPONSE",
+          f.id,
+          `File generation ${f.generation} is marked ${f.status} without a stored bank response record.`,
+        );
+      }
+    }
+  }
   if (incomplete) return;
+  if (scan.bankResponses !== undefined) {
+    // Compare three-way payout leg totals: SQL Server PayoutInstructions vs COBOL posted debits vs Bank-confirmed + in-flight
+    let sqlPostedDebitTotal = 0;
+    let corePostedDebitTotal = 0;
+    let bankConfirmedPaidTotal = 0;
+    for (const p of scan.payouts) {
+      if (p.debitStatus === "POSTED") sqlPostedDebitTotal += p.amountMinor;
+      const c = core.get(p.id);
+      if (c && c.status === "POSTED") corePostedDebitTotal += c.amountMinor;
+    }
+    const payoutById = new Map(scan.payouts.map((p) => [p.id, p]));
+    for (const br of scan.bankResponses) {
+      if (br.status !== "ACCEPTED") continue;
+      try {
+        const parsedResp = parseAnyBankResponse(br.content);
+        for (const r of parsedResp.results) {
+          const inst = payoutById.get(r.reference);
+          if (inst && r.outcome === "PAID") {
+            bankConfirmedPaidTotal += inst.amountMinor;
+          }
+        }
+      } catch {
+        // Already flagged via BANK_RESPONSE_PARSE_ERROR
+      }
+    }
+    if (
+      sqlPostedDebitTotal !== corePostedDebitTotal ||
+      bankConfirmedPaidTotal !== bucket.paid
+    ) {
+      add(
+        "HIGH",
+        "THREE_WAY_TOTAL_MISMATCH",
+        null,
+        `Three-way payout totals disagree: SQL debits ${rand(sqlPostedDebitTotal)}, COBOL journal debits ${rand(corePostedDebitTotal)}, bank-confirmed paid ${rand(bankConfirmedPaidTotal)} vs instruction paid ${rand(bucket.paid)}.`,
+      );
+    }
+  }
   for (const c of core.values())
     if (
       c.status === "POSTED" &&
@@ -359,10 +604,11 @@ export async function reconcile(
   legacy: Legacy,
   clientId: string,
   payoutStore?: PayoutStore,
+  traceparent?: string | null,
 ): Promise<ReconciliationRun> {
   const [modern, inventory, payouts] = await Promise.all([
     store.scan(clientId),
-    legacy.inventory(),
+    legacy.inventory(traceparent ? { traceparent } : undefined),
     payoutStore?.scanPayouts(clientId),
   ]);
   const run: ReconciliationRun = {
@@ -406,6 +652,7 @@ export function reportCsv(run: ReconciliationRun): string {
     "coreCount",
     "truncated",
     "severity",
+    "category",
     "code",
     "reference",
     "details",
@@ -414,7 +661,8 @@ export function reportCsv(run: ReconciliationRun): string {
     ? run.findings
     : [
         {
-          severity: "INFO",
+          severity: "INFO" as const,
+          category: "INFO" as const,
           code: "MATCHED",
           reference: null,
           details: "No discrepancies in this captured observation.",
@@ -433,6 +681,7 @@ export function reportCsv(run: ReconciliationRun): string {
         run.coreCount,
         run.truncated,
         f.severity,
+        f.category ?? classifyVariance(f.code),
         f.code,
         f.reference,
         f.details,

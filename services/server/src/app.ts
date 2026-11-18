@@ -2,11 +2,20 @@ import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { parseAllocation, UUID, type Principal } from "@bureau/contracts";
-import { Conflict, type Store } from "./store.ts";
+import {
+  Conflict,
+  DEFAULT_IDEMPOTENCY_TTL_SECONDS,
+  IdempotencyPayloadMismatch,
+  MemoryIdempotencyStore,
+  type IdempotencyRecordStore,
+  type Store,
+} from "./store.ts";
+import { fingerprint } from "./ids.ts";
 import type { Legacy } from "./legacy.ts";
-import { equal, issue, verify } from "./auth.ts";
+import { equal, issue, JwtKeySet, verify } from "./auth.ts";
 import { reconcile, reportCsv } from "./reconciliation.ts";
 import {
+  ApprovalIntegrityError,
   approveFile,
   BankUnavailable,
   FileAwaitingApproval,
@@ -19,10 +28,21 @@ import {
   type Bank,
   type PayoutStore,
 } from "./payouts.ts";
-import { EftError } from "./eft.ts";
+import {
+  EftError,
+  iso20022PainFormatter,
+  parseAnyPaymentFile,
+  sha256,
+} from "./eft.ts";
+import {
+  createChildTraceparent,
+  extractOrCreateTraceparent,
+} from "./trace.ts";
 declare module "fastify" {
   interface FastifyRequest {
     principal?: Principal;
+    traceparent: string;
+    traceId: string;
   }
 }
 export function makeApp(
@@ -30,13 +50,26 @@ export function makeApp(
   legacy: Legacy,
   options: {
     sessionSecret: string;
+    jwtKeySet?: JwtKeySet;
     demoPassword: string;
     origins?: string[];
     health?: () => Promise<void>;
     logger?: boolean;
     payouts?: { store: PayoutStore; bank: Bank };
+    idempotencyTtlSeconds?: number;
   },
 ) {
+  const jwtKeySet =
+    options.jwtKeySet ?? JwtKeySet.fromDemoSecret(options.sessionSecret);
+  const fallbackIdempotency = new MemoryIdempotencyStore();
+  const idempotencyStore: IdempotencyRecordStore =
+    store.acquireIdempotency &&
+    store.completeIdempotency &&
+    store.releaseIdempotency
+      ? (store as IdempotencyRecordStore)
+      : fallbackIdempotency;
+  const idempotencyTtlSeconds =
+    options.idempotencyTtlSeconds ?? DEFAULT_IDEMPOTENCY_TTL_SECONDS;
   const app = Fastify({
     bodyLimit: 8192,
     logger: options.logger
@@ -46,17 +79,28 @@ export function makeApp(
   app.register(cors, {
     origin: options.origins ?? ["http://localhost:8081"],
     credentials: false,
+    exposedHeaders: ["traceparent", "Idempotency-Replayed"],
   });
   app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
   app.addHook("onRequest", async (request, reply) => {
+    const trace = extractOrCreateTraceparent(request.headers["traceparent"]);
+    request.traceparent = trace.raw;
+    request.traceId = trace.traceId;
+    request.log = request.log.child({
+      traceId: trace.traceId,
+      traceparent: trace.raw,
+    });
+    reply.header("traceparent", trace.raw);
     if (
       request.method === "OPTIONS" ||
-      ["/health", "/session"].includes(request.url.split("?")[0])
+      ["/health", "/session", "/.well-known/jwks.json"].includes(
+        request.url.split("?")[0],
+      )
     )
       return;
     const header = request.headers.authorization ?? "";
     const principal = header.startsWith("Bearer ")
-      ? verify(header.slice(7), options.sessionSecret)
+      ? verify(header.slice(7), jwtKeySet)
       : undefined;
     if (!principal)
       return reply.code(401).send({ error: "Sign in to continue" });
@@ -66,6 +110,7 @@ export function makeApp(
     await options.health?.();
     return { status: "ok", service: "bureau-api" };
   });
+  app.get("/.well-known/jwks.json", async () => jwtKeySet.publicJwks());
   app.post(
     "/session",
     { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
@@ -81,12 +126,12 @@ export function makeApp(
         !equal(body.password, options.demoPassword)
       )
         return reply.code(401).send({ error: "Invalid demo credentials" });
-      const token = issue(body.username, options.sessionSecret);
+      const token = issue(body.username, jwtKeySet);
       if (!token)
         return reply.code(401).send({ error: "Invalid demo credentials" });
       return {
         token,
-        principal: verify(token, options.sessionSecret),
+        principal: verify(token, jwtKeySet),
         expiresIn: 3600,
       };
     },
@@ -116,6 +161,7 @@ export function makeApp(
         legacy,
         request.principal!.clientId,
         options.payouts?.store,
+        createChildTraceparent(request.traceparent).raw,
       ),
     };
   });
@@ -148,10 +194,55 @@ export function makeApp(
     } catch (error) {
       return reply.code(400).send({ error: (error as Error).message });
     }
+    const fp = fingerprint(input);
+    const acquired = await idempotencyStore.acquireIdempotency(
+      p.clientId,
+      key,
+      fp,
+      idempotencyTtlSeconds,
+    );
+    if (acquired.kind === "MISMATCH") {
+      return reply.code(422).send({
+        error: "Idempotency-Key reused with a different request payload",
+        code: "IDEMPOTENCY_PAYLOAD_MISMATCH",
+      });
+    }
+    if (acquired.kind === "IN_PROGRESS") {
+      return reply.code(409).send({
+        error: "A request with this Idempotency-Key is currently in progress",
+        code: "IDEMPOTENCY_IN_PROGRESS",
+      });
+    }
+    if (acquired.kind === "REPLAY") {
+      return reply
+        .code(acquired.statusCode)
+        .header("Idempotency-Replayed", "true")
+        .send(acquired.body);
+    }
     try {
-      const allocation = await store.create(p.clientId, key, input);
+      const allocation = await store.create(
+        p.clientId,
+        key,
+        input,
+        undefined,
+        request.traceparent,
+      );
+      await idempotencyStore.completeIdempotency(
+        p.clientId,
+        key,
+        202,
+        allocation,
+        allocation.id,
+      );
       return reply.code(202).send(allocation);
     } catch (error) {
+      await idempotencyStore.releaseIdempotency(p.clientId, key).catch(() => {});
+      if (error instanceof IdempotencyPayloadMismatch) {
+        return reply.code(422).send({
+          error: error.message,
+          code: "IDEMPOTENCY_PAYLOAD_MISMATCH",
+        });
+      }
       if (error instanceof Conflict)
         return reply.code(409).send({ error: error.message });
       throw error;
@@ -184,7 +275,9 @@ export function makeApp(
         : undefined;
       if (!a || a.clientId !== p.clientId)
         return reply.code(404).send({ error: "Allocation not found" });
-      const result = await legacy.inquire(a.id);
+      const result = await legacy.inquire(a.id, {
+        traceparent: createChildTraceparent(request.traceparent).raw,
+      });
       if (!result)
         return reply
           .code(409)
@@ -210,7 +303,9 @@ export function makeApp(
           .send({ error: "Allocation already has a final outcome" });
       // A missing intake can be delivered using its original reference. A known
       // intake must be checked against the core before it re-enters a batch.
-      if (await legacy.lookup(a.id)) await legacy.retryUnposted(a.id);
+      const childTrace = createChildTraceparent(request.traceparent).raw;
+      if (await legacy.lookup(a.id, { traceparent: childTrace }))
+        await legacy.retryUnposted(a.id, { traceparent: childTrace });
       await store.wake(a.id);
       return { status: "RESUMED_WITH_ORIGINAL_REFERENCE" };
     },
@@ -232,6 +327,13 @@ function registerPayouts(
   app: FastifyInstance,
   { store, bank }: { store: PayoutStore; bank: Bank },
 ) {
+  for (const xmlType of ["application/xml", "text/xml"]) {
+    app.addContentTypeParser(
+      xmlType,
+      { parseAs: "string" },
+      (_req, body, done) => done(null, body),
+    );
+  }
   const ops = (request: { principal?: Principal }) =>
     request.principal!.role === "ops";
   const fail = (error: unknown) => {
@@ -260,7 +362,9 @@ function registerPayouts(
     try {
       return reply
         .code(202)
-        .send(await store.createPayout(p.clientId, key, input));
+        .send(
+          await store.createPayout(p.clientId, key, input, request.traceparent),
+        );
     } catch (error) {
       const [code, message] = fail(error);
       return reply.code(code).send({ error: message });
@@ -316,6 +420,29 @@ function registerPayouts(
         .send(file.content);
     },
   );
+  app.get<{ Params: { id: string } }>(
+    "/payout-files/:id/pain001.xml",
+    async (request, reply) => {
+      if (!ops(request))
+        return reply.code(403).send({ error: "Operations role required" });
+      const file = UUID.test(request.params.id)
+        ? await store.payoutFile(request.principal!.clientId, request.params.id)
+        : undefined;
+      if (!file)
+        return reply.code(404).send({ error: "Payout file not found" });
+      const xml = iso20022PainFormatter.buildPaymentFile(
+        parseAnyPaymentFile(file.content),
+      );
+      return reply
+        .type(iso20022PainFormatter.contentType)
+        .header("X-Content-SHA256", sha256(xml))
+        .header(
+          "Content-Disposition",
+          `attachment; filename="BUREAU01-${String(file.generation).padStart(6, "0")}.xml"`,
+        )
+        .send(xml);
+    },
+  );
   app.post<{ Params: { id: string } }>(
     "/payout-files/:id/approve",
     async (request, reply) => {
@@ -332,6 +459,11 @@ function registerPayouts(
         );
         return reply.code(200).send(file);
       } catch (error) {
+        if (error instanceof ApprovalIntegrityError) {
+          return reply
+            .code(409)
+            .send({ error: error.message, code: error.code });
+        }
         const [code, message] = fail(error);
         return reply.code(code).send({ error: message });
       }

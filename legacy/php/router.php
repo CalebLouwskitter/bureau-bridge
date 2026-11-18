@@ -5,31 +5,47 @@ function respond(mixed $data, int $status=200): never {
     http_response_code($status); header('Content-Type: application/json');
     echo json_encode($data,JSON_THROW_ON_ERROR); exit;
 }
-function bearer(string $name): void {
-    if (!hash_equals('Bearer '.config($name),$_SERVER['HTTP_AUTHORIZATION'] ?? '')) respond(['error'=>'Unauthorized'],401);
+function verify_signed_request(string $secretEnvName, string $expectedKeyId, string $rawBody): void {
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host = is_string($_SERVER['HTTP_HOST'] ?? null) ? $_SERVER['HTTP_HOST'] : '';
+    $requestUri = is_string($_SERVER['REQUEST_URI'] ?? null) ? $_SERVER['REQUEST_URI'] : '';
+    $targetUri = $scheme . '://' . $host . $requestUri;
+    $method = is_string($_SERVER['REQUEST_METHOD'] ?? null) ? $_SERVER['REQUEST_METHOD'] : 'GET';
+    $sigInput = is_string($_SERVER['HTTP_SIGNATURE_INPUT'] ?? null) ? $_SERVER['HTTP_SIGNATURE_INPUT'] : null;
+    $sig = is_string($_SERVER['HTTP_SIGNATURE'] ?? null) ? $_SERVER['HTTP_SIGNATURE'] : null;
+    $digest = is_string($_SERVER['HTTP_CONTENT_DIGEST'] ?? null) ? $_SERVER['HTTP_CONTENT_DIGEST'] : null;
+    if (!verify_http_signature($method, $targetUri, $rawBody, $sigInput, $sig, $digest, $expectedKeyId, config($secretEnvName))) {
+        respond(['error'=>'Unauthorized'],401);
+    }
 }
+$rawTrace = $_SERVER['HTTP_TRACEPARENT'] ?? null;
+$traceparent = ensure_traceparent(is_string($rawTrace) ? $rawTrace : null);
+$traceId = trace_id_from_traceparent($traceparent);
+header('traceparent: ' . $traceparent);
 try {
     $path = parse_url($_SERVER['REQUEST_URI'] ?? '',PHP_URL_PATH);
     $path = is_string($path) ? $path : '';
     $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
     if ($path === '/health') { db()->query('SELECT 1'); respond(['status'=>'ok']); }
     if (str_starts_with($path,'/v1/')) {
+        $rawBody = file_get_contents('php://input',false,null,0,8193);
+        if ($rawBody === false) respond(['error'=>'Cannot read request body'],400);
+        if (strlen($rawBody)>8192) respond(['error'=>'Body too large'],413);
         if (preg_match('#^/v1/requests/([0-9a-f-]{36})/retry$#D',$path,$matches) && $method==='POST') {
-            bearer('LEGACY_OPS_KEY'); respond(retry_unposted($matches[1]));
+            verify_signed_request('LEGACY_OPS_KEY','ops',$rawBody); respond(retry_unposted($matches[1]));
         }
         if (preg_match('#^/v1/requests/([0-9a-f-]{36})/inquiry$#D',$path,$matches) && $method==='POST') {
-            bearer('LEGACY_OPS_KEY'); respond(inquiry($matches[1]));
+            verify_signed_request('LEGACY_OPS_KEY','ops',$rawBody); respond(inquiry($matches[1]));
         }
-        bearer('LEGACY_BRIDGE_KEY');
+        verify_signed_request('LEGACY_BRIDGE_KEY','bridge',$rawBody);
         if ($path==='/v1/accounts' && $method==='GET') respond(core_run('SNAPSHOT'));
         if ($path==='/v1/reconciliation' && $method==='GET') respond(reconciliation_inventory());
         if ($path==='/v1/requests' && $method==='POST') {
-            $raw = file_get_contents('php://input',false,null,0,8193);
-            if ($raw === false) respond(['error'=>'Cannot read request body'],400);
-            if (strlen($raw)>8192) respond(['error'=>'Body too large'],413);
-            $data = json_decode($raw,true,32,JSON_THROW_ON_ERROR);
+            $data = json_decode($rawBody,true,32,JSON_THROW_ON_ERROR);
             if (!is_array($data)) respond(['error'=>'Expected object'],400);
-            respond(intake($data),202);
+            $rawToken = $_SERVER['HTTP_X_FENCING_TOKEN'] ?? null;
+            $fencingToken = parse_fencing_token(is_string($rawToken) ? $rawToken : null);
+            respond(intake($data, $fencingToken, $traceparent),202);
         }
         if (preg_match('#^/v1/requests/([0-9a-f-]{36})$#D',$path,$matches) && $method==='GET') {
             $row=lookup($matches[1]);
@@ -81,6 +97,16 @@ try {
     }
     require __DIR__.'/portal.php';
 } catch (InvalidArgumentException|JsonException $e) { respond(['error'=>$e->getMessage()],400); }
+catch (StaleFencingTokenException $e) { respond(['error'=>$e->getMessage(),'code'=>'STALE_FENCING_TOKEN'],409); }
 catch (DomainException $e) { respond(['error'=>$e->getMessage()],409); }
 catch (OutOfBoundsException $e) { respond(['error'=>$e->getMessage()],404); }
-catch (Throwable $e) { error_log($e->getMessage()); respond(['error'=>'Legacy operation needs investigation'],503); }
+catch (Throwable $e) {
+    error_log(json_encode([
+        'level' => 'error',
+        'component' => 'legacy-php',
+        'traceId' => $traceId,
+        'traceparent' => $traceparent,
+        'message' => $e->getMessage(),
+    ]) ?: $e->getMessage());
+    respond(['error'=>'Legacy operation needs investigation'],503);
+}

@@ -230,11 +230,18 @@ async function main() {
     const tStart = performance.now();
 
     if (isReplay) {
-      // Replay mode: send every request twice concurrently with the exact same idempotency key
-      const [res1, res2] = await Promise.all([
+      // Replay mode: send every request twice concurrently with the exact same idempotency key.
+      // Per IETF Idempotency-Key draft, a simultaneous duplicate while IN_PROGRESS may receive 409;
+      // retrying after completion replays the original 202 with the same allocation ID.
+      let [res1, res2] = await Promise.all([
         submitOnce(req.key, req.payload),
         submitOnce(req.key, req.payload),
       ]);
+      if (res1.status === 409 && res2.status === 202) {
+        res1 = await submitOnce(req.key, req.payload);
+      } else if (res2.status === 409 && res1.status === 202) {
+        res2 = await submitOnce(req.key, req.payload);
+      }
 
       if (res1.status !== 202) {
         throw new Error(

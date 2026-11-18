@@ -1,5 +1,36 @@
 import { createHash } from "node:crypto";
 import { UUID } from "@bureau/contracts";
+import {
+  buildPain001,
+  buildPain002,
+  Iso20022PainFormatter,
+  PAIN_001_NAMESPACE,
+  PAIN_002_NAMESPACE,
+  parsePain001,
+  parsePain002,
+} from "./iso20022.ts";
+
+export {
+  buildPain001,
+  buildPain002,
+  Iso20022PainFormatter,
+  PAIN_001_NAMESPACE,
+  PAIN_002_NAMESPACE,
+  parsePain001,
+  parsePain002,
+};
+
+export type PaymentRailFormat = "EFT_FIXED_WIDTH" | "ISO20022_PAIN001";
+
+export interface PaymentRailFormatter {
+  readonly format: PaymentRailFormat;
+  readonly contentType: string;
+  readonly fileExtension: string;
+  buildPaymentFile(file: EftFile): string;
+  parsePaymentFile(content: string): EftFile;
+  buildStatusResponse(response: BankResponse): string;
+  parseStatusResponse(content: string): BankResponse;
+}
 
 // BB-EFT v1: a simplified fixed-width credit transfer file modelled on the
 // header/detail/trailer shape of bank EFT submissions. It is not a real bank
@@ -289,4 +320,55 @@ export function parseResponse(content: string): BankResponse {
     reason: header.slice(51, 71).trim() || null,
     results,
   };
+}
+
+export class BankservEftFormatter implements PaymentRailFormatter {
+  readonly format = "EFT_FIXED_WIDTH" as const;
+  readonly contentType = "text/plain; charset=utf-8";
+  readonly fileExtension = "txt";
+
+  buildPaymentFile(file: EftFile): string {
+    return buildEft(file);
+  }
+
+  parsePaymentFile(content: string): EftFile {
+    return parseEft(content);
+  }
+
+  buildStatusResponse(response: BankResponse): string {
+    return buildResponse(response);
+  }
+
+  parseStatusResponse(content: string): BankResponse {
+    return parseResponse(content);
+  }
+}
+
+export const bankservEftFormatter = new BankservEftFormatter();
+export const iso20022PainFormatter = new Iso20022PainFormatter();
+
+export function getPaymentRailFormatter(
+  format: PaymentRailFormat = "EFT_FIXED_WIDTH",
+): PaymentRailFormatter {
+  return format === "ISO20022_PAIN001"
+    ? iso20022PainFormatter
+    : bankservEftFormatter;
+}
+
+export function detectPaymentRailFormat(content: string): PaymentRailFormat {
+  return content.trimStart().startsWith("<")
+    ? "ISO20022_PAIN001"
+    : "EFT_FIXED_WIDTH";
+}
+
+export function parseAnyPaymentFile(content: string): EftFile {
+  return getPaymentRailFormatter(detectPaymentRailFormat(content)).parsePaymentFile(
+    content,
+  );
+}
+
+export function parseAnyBankResponse(content: string): BankResponse {
+  return getPaymentRailFormatter(
+    detectPaymentRailFormat(content),
+  ).parseStatusResponse(content);
 }

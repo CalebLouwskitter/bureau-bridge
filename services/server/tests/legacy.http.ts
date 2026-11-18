@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { LegacyClient } from "../src/legacy.ts";
+import { signHttpRequest } from "../src/http-signature.ts";
 import { compare } from "../src/reconciliation.ts";
 const base = process.env.LEGACY_URL ?? "http://localhost:8080";
 const legacy = new LegacyClient(
@@ -28,6 +29,33 @@ for (const path of [
   "/reports/batches.csv",
 ])
   assert.equal((await fetch(base + path)).status, 401);
+// Static Bearer tokens are rejected; RFC 9421 signed requests are required.
+assert.equal(
+  (
+    await fetch(base + "/v1/accounts", {
+      headers: { Authorization: `Bearer ${process.env.LEGACY_BRIDGE_KEY}` },
+    })
+  ).status,
+  401,
+);
+// Tampered payload body on a signed request is rejected.
+const signedPost = signHttpRequest({
+  method: "POST",
+  targetUri: new URL("/v1/requests", base.replace(/\/+$/, "") + "/").toString(),
+  body: JSON.stringify({ reference: "00000000-0000-4000-8000-000000000099" }),
+  keyId: "bridge",
+  secret: process.env.LEGACY_BRIDGE_KEY!,
+});
+assert.equal(
+  (
+    await fetch(base + "/v1/requests", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...signedPost },
+      body: JSON.stringify({ reference: "00000000-0000-4000-8000-000000000098" }),
+    })
+  ).status,
+  401,
+);
 const headers = {
   Authorization:
     "Basic " +

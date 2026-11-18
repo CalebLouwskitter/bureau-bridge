@@ -136,6 +136,17 @@ export function getJohannesburgDateTime(
 }
 
 /**
+ * Under Section 2(1) of South Africa's Public Holidays Act 36 of 1994,
+ * whenever any public holiday falls on a Sunday, the following Monday
+ * shall be a public holiday. Saturday holidays do NOT roll to Monday.
+ */
+export function observedMondayForSundayHoliday(
+  dateString: string,
+): string | null {
+  return dayOfWeek(dateString) === 0 ? addDays(dateString, 1) : null;
+}
+
+/**
  * Returns South African public holidays for a given year under the Public Holidays Act 36 of 1994.
  *
  * Fixed-date holidays:
@@ -164,14 +175,21 @@ export function southAfricanPublicHolidays(
   extraHolidays: readonly string[] = [],
 ): HolidayList {
   const set = new Set<string>();
+  const yearPrefix = `${year}-`;
+
+  const addWithSundayRollover = (dateStr: string) => {
+    if (dateStr.startsWith(yearPrefix)) {
+      set.add(dateStr);
+    }
+    const observedMonday = observedMondayForSundayHoliday(dateStr);
+    if (observedMonday && observedMonday.startsWith(yearPrefix)) {
+      set.add(observedMonday);
+    }
+  };
 
   // 1. Fixed-date holidays and Sunday-to-Monday shifts
   for (const [month, day] of FIXED_HOLIDAYS) {
-    const dateStr = toDateString(year, month, day);
-    set.add(dateStr);
-    if (dayOfWeek(dateStr) === 0) {
-      set.add(addDays(dateStr, 1));
-    }
+    addWithSundayRollover(toDateString(year, month, day));
   }
 
   // 2. Easter-derived holidays (Good Friday and Family Day)
@@ -179,11 +197,10 @@ export function southAfricanPublicHolidays(
   set.add(addDays(easter, -2)); // Good Friday (always Friday)
   set.add(addDays(easter, 1)); // Family Day / Easter Monday (always Monday)
 
-  // 3. Proclaimed / extra holidays for this year
-  const yearPrefix = `${year}-`;
+  // 3. Proclaimed / extra holidays (including Sunday-to-Monday rollover under Section 2(1))
   for (const extra of extraHolidays) {
-    if (extra.startsWith(yearPrefix)) {
-      set.add(extra);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(extra)) {
+      addWithSundayRollover(extra);
     }
   }
 
@@ -196,6 +213,15 @@ export function southAfricanPublicHolidays(
   });
 
   return list as HolidayList;
+}
+
+export function isPublicHoliday(
+  date: Date | string,
+  extraHolidaysOrOptions?: ExtraHolidaysArg,
+): boolean {
+  const extraHolidays = extractExtraHolidays(extraHolidaysOrOptions);
+  const { dateString, year } = getJohannesburgDateTime(date);
+  return southAfricanPublicHolidays(year, extraHolidays).has(dateString);
 }
 
 type ExtraHolidaysArg =

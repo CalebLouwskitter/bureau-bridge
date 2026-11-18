@@ -3,9 +3,20 @@ import { SqlPayoutStore } from "./payout-store.ts";
 import { BankClient } from "./payouts.ts";
 import { env } from "./config.ts";
 import { LegacyClient } from "./legacy.ts";
+import { JwtKeySet, type JwksDocument } from "./auth.ts";
 import { makeApp } from "./app.ts";
 const pool = await connection().connect();
 const store = new SqlPayoutStore(pool);
+const sessionSecret = env("SESSION_SECRET");
+const jwtKeySet = process.env.JWT_PRIVATE_KEY_PEM
+  ? JwtKeySet.fromPem(
+      process.env.JWT_PRIVATE_KEY_PEM,
+      process.env.JWT_KID ?? "primary",
+      process.env.JWT_JWKS_JSON
+        ? (JSON.parse(process.env.JWT_JWKS_JSON) as JwksDocument)
+        : undefined,
+    )
+  : JwtKeySet.fromDemoSecret(sessionSecret);
 const app = makeApp(
   store,
   new LegacyClient(
@@ -14,7 +25,8 @@ const app = makeApp(
     env("LEGACY_OPS_KEY"),
   ),
   {
-    sessionSecret: env("SESSION_SECRET"),
+    sessionSecret,
+    jwtKeySet,
     demoPassword: env("DEMO_PASSWORD"),
     logger: true,
     payouts: {

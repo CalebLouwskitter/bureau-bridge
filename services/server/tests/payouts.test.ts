@@ -11,10 +11,20 @@ import {
   type Payout,
 } from "@bureau/contracts";
 import {
+  bankservEftFormatter,
   buildEft,
+  buildPain001,
+  buildPain002,
   buildResponse,
   EftError,
+  getPaymentRailFormatter,
+  iso20022PainFormatter,
+  PAIN_001_NAMESPACE,
+  parseAnyBankResponse,
+  parseAnyPaymentFile,
   parseEft,
+  parsePain001,
+  parsePain002,
   parseResponse,
   sha256,
   USER_CODE,
@@ -24,6 +34,7 @@ import { BankSimulator, MemoryLedger } from "../src/bank-sim.ts";
 import { deriveUuid, returnKey } from "../src/ids.ts";
 import {
   actionDate,
+  ApprovalIntegrityError,
   approveFile,
   BankUnavailable,
   FileAwaitingApproval,
@@ -830,6 +841,174 @@ test("payout API: maker-checker dual control, role enforcement, approval, idempo
     (await post("/payout-files/not-a-uuid/approve", "ops-two")).statusCode,
     404,
   );
+
+  await app.close();
+});
+
+test("ISO 20022 pain.001.001.09 and pain.002 round-trip through PaymentRailFormatter and reject tampering", () => {
+  const file = eft();
+  const painFormatter = getPaymentRailFormatter("ISO20022_PAIN001");
+  const eftFormatter = getPaymentRailFormatter("EFT_FIXED_WIDTH");
+  assert.equal(painFormatter, iso20022PainFormatter);
+  assert.equal(eftFormatter, bankservEftFormatter);
+
+  const xml = painFormatter.buildPaymentFile(file);
+  assert.ok(xml.includes(PAIN_001_NAMESPACE));
+  assert.ok(xml.includes("<CtrlSum>400.00</CtrlSum>"));
+  assert.ok(xml.includes("<ReqdExctnDt><Dt>2026-10-21</Dt></ReqdExctnDt>"));
+  // Deterministic byte output regardless of input order
+  assert.equal(
+    buildPain001({ ...file, items: [...file.items].reverse() }),
+    xml,
+  );
+
+  const parsed = parsePain001(xml);
+  assert.equal(parsed.fileId, file.fileId);
+  assert.equal(parsed.userCode, file.userCode);
+  assert.equal(parsed.generation, file.generation);
+  assert.equal(parsed.actionDate, file.actionDate);
+  assert.equal(parsed.items.length, 2);
+  assert.equal(parsed.items[0].amountMinor, 10000);
+  assert.equal(parsed.items[1].amountMinor, 30000);
+  assert.deepEqual(parseAnyPaymentFile(xml), parsed);
+
+  // Tampered CtrlSum or NbOfTxs rejected
+  assert.throws(
+    () => parsePain001(xml.replace("<CtrlSum>400.00</CtrlSum>", "<CtrlSum>500.00</CtrlSum>")),
+    (e: EftError) => e.code === "TRAILER_AMOUNT",
+  );
+  assert.throws(
+    () => parsePain001(xml.replace("<NbOfTxs>2</NbOfTxs>", "<NbOfTxs>3</NbOfTxs>")),
+    (e: EftError) => e.code === "TRAILER_COUNT",
+  );
+
+  // pain.002 status response round-trip (PAID + RETURNED with ISO AC04/AC01/AC06 mapping)
+  const statusResp = {
+    fileId: file.fileId,
+    generation: 1,
+    status: "ACCEPTED" as const,
+    reason: null,
+    results: [
+      { reference: ids[0], outcome: "PAID" as const, code: null },
+      { reference: ids[1], outcome: "RETURNED" as const, code: "AC" },
+    ],
+  };
+  const pain002 = painFormatter.buildStatusResponse(statusResp);
+  assert.ok(pain002.includes("<GrpSts>PART</GrpSts>"));
+  assert.ok(pain002.includes("<Cd>AC04</Cd>"));
+  const parsedStatus = parsePain002(pain002);
+  assert.deepEqual(parsedStatus, statusResp);
+  assert.deepEqual(parseAnyBankResponse(pain002), statusResp);
+
+  // File-level RJCT pain.002 round-trip
+  const rejectedXml = buildPain002({
+    fileId: file.fileId,
+    generation: 2,
+    status: "REJECTED",
+    reason: "DUPLICATE_GENERATION",
+    results: [],
+  });
+  const parsedRejected = parsePain002(rejectedXml);
+  assert.equal(parsedRejected.status, "REJECTED");
+  assert.equal(parsedRejected.reason, "DUPLICATE_GENERATION");
+  assert.equal(parsedRejected.results.length, 0);
+
+  // Unknown ISO reason code rejected
+  assert.throws(
+    () => parsePain002(pain002.replace("<Cd>AC04</Cd>", "<Cd>ZZ99</Cd>")),
+    EftError,
+  );
+});
+
+test("maker-checker cryptographic approval hash rejects approval if payout amount or beneficiary account mutates", async () => {
+  const store = new MemoryPayoutStore();
+  const p = await store.createPayout("INSURER_DEMO", randomUUID(), {
+    sourceAccount: "INS000000001",
+    targetAccount: "EMP000000001",
+    amountMinor: 5_000_000,
+    currency: "ZAR",
+  });
+  const file = (await generateFile(
+    store,
+    "INSURER_DEMO",
+    randomUUID(),
+    new Date(),
+    "ops",
+  ))!;
+  assert.equal(file.status, "AWAITING_APPROVAL");
+  assert.equal(typeof file.approvalHash, "string");
+  assert.equal(file.approvalHash?.length, 64);
+
+  const app = makeApp({} as any, {} as any, {
+    sessionSecret: "test-secret",
+    demoPassword: "test-password",
+    payouts: { store, bank: {} as Bank },
+  });
+  const opsTwoHeaders = {
+    authorization: `Bearer ${issue("ops-two", "test-secret")}`,
+  };
+
+  // Export as ISO 20022 pain.001.001.09 XML via API
+  const xmlRes = await app.inject({
+    method: "GET",
+    url: `/payout-files/${file.id}/pain001.xml`,
+    headers: opsTwoHeaders,
+  });
+  assert.equal(xmlRes.statusCode, 200);
+  assert.match(xmlRes.headers["content-type"]!, /application\/xml/);
+  assert.equal(parsePain001(xmlRes.body).items[0].reference, p.id);
+
+  // Tamper with beneficiary bank account after file creation
+  const originalAccount = store.payouts.get(p.id)!.bankAccount;
+  store.payouts.get(p.id)!.bankAccount = "99999999999";
+
+  await assert.rejects(
+    () => approveFile(store, "INSURER_DEMO", file.id, "ops-two"),
+    ApprovalIntegrityError,
+  );
+  const apiTampered = await app.inject({
+    method: "POST",
+    url: `/payout-files/${file.id}/approve`,
+    headers: opsTwoHeaders,
+    payload: {},
+  });
+  assert.equal(apiTampered.statusCode, 409);
+  assert.equal(apiTampered.json().code, "APPROVAL_HASH_MISMATCH");
+
+  // Restore account, tamper amount instead -> still rejected!
+  store.payouts.get(p.id)!.bankAccount = originalAccount;
+  store.payouts.get(p.id)!.amountMinor = 5_000_001;
+  await assert.rejects(
+    () => approveFile(store, "INSURER_DEMO", file.id, "ops-two"),
+    ApprovalIntegrityError,
+  );
+
+  // Restore original amount -> approval succeeds cleanly and accepts pain.002 XML response
+  store.payouts.get(p.id)!.amountMinor = 5_000_000;
+  const approved = await app.inject({
+    method: "POST",
+    url: `/payout-files/${file.id}/approve`,
+    headers: opsTwoHeaders,
+    payload: {},
+  });
+  assert.equal(approved.statusCode, 200);
+  assert.equal(approved.json().status, "GENERATED");
+
+  const pain002Xml = buildPain002({
+    fileId: file.id,
+    generation: file.generation,
+    status: "ACCEPTED",
+    reason: null,
+    results: [{ reference: p.id, outcome: "PAID", code: null }],
+  });
+  const xmlImport = await app.inject({
+    method: "POST",
+    url: "/bank-responses",
+    headers: { ...opsTwoHeaders, "content-type": "application/xml" },
+    payload: pain002Xml,
+  });
+  assert.equal(xmlImport.statusCode, 200);
+  assert.equal(xmlImport.json().paid, 1);
 
   await app.close();
 });

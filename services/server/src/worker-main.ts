@@ -3,7 +3,10 @@ import { SqlPayoutStore } from "./payout-store.ts";
 import { env } from "./config.ts";
 import { LegacyClient } from "./legacy.ts";
 import { tick } from "./worker.ts";
-import { reconcile } from "./reconciliation.ts";
+import { PostBatchReconciliationRunner } from "./reconciliation-runner.ts";
+import { generateTraceparent } from "./trace.ts";
+const logWorker = (entry: Record<string, unknown>) =>
+  console.log(JSON.stringify({ timestamp: new Date().toISOString(), ...entry }));
 const pool = await connection().connect();
 const store = new SqlPayoutStore(pool),
   legacy = new LegacyClient(
@@ -19,8 +22,18 @@ const interval = (name: string, fallback: string) => {
 };
 const accountEvery = interval("ACCOUNT_SYNC_SECONDS", "30"),
   reconcileEvery = interval("RECONCILE_SECONDS", "300");
-let nextAccounts = 0,
-  nextReconciliation = 0;
+let nextAccounts = 0;
+let latestGeneration: string | undefined;
+const reconciliationRunner = new PostBatchReconciliationRunner(
+  store,
+  legacy,
+  "INSURER_DEMO",
+  {
+    payoutStore: store,
+    intervalMs: reconcileEvery,
+    log: logWorker,
+  },
+);
 process.once("SIGTERM", () => {
   running = false;
 });
@@ -31,13 +44,13 @@ while (running) {
   try {
     if (Date.now() >= nextAccounts) {
       nextAccounts = Date.now() + accountEvery;
-      await store.syncAccounts("INSURER_DEMO", await legacy.accounts());
+      const trace = generateTraceparent();
+      const snapshot = await legacy.accounts({ traceparent: trace.raw });
+      await store.syncAccounts("INSURER_DEMO", snapshot);
+      latestGeneration = snapshot.generation;
     }
-    if (Date.now() >= nextReconciliation) {
-      nextReconciliation = Date.now() + reconcileEvery;
-      await reconcile(store, legacy, "INSURER_DEMO", store);
-    }
-    if (await tick(store, legacy)) continue;
+    await reconciliationRunner.runIfNeeded(latestGeneration);
+    if (await tick(store, legacy, logWorker)) continue;
   } catch (error) {
     console.error(
       JSON.stringify({

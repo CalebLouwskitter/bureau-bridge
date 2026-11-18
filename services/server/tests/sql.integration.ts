@@ -5,7 +5,12 @@ import type { ReconciliationRun } from "@bureau/contracts";
 import { BANK_DETAILS, SETTLEMENT_ACCOUNT } from "@bureau/contracts";
 import { connection, Conflict } from "../src/store.ts";
 import { SqlPayoutStore } from "../src/payout-store.ts";
-import { generateFile, importResponse, submitFile } from "../src/payouts.ts";
+import {
+  ApprovalIntegrityError,
+  generateFile,
+  importResponse,
+  submitFile,
+} from "../src/payouts.ts";
 import { BankSimulator, MemoryLedger } from "../src/bank-sim.ts";
 import {
   buildResponse,
@@ -48,14 +53,16 @@ try {
     "Run against a fresh database with worker stopped",
   );
   const first = jobs.find(Boolean)!;
+  assert.equal(first.fencingToken, 1);
   await pool
     .request()
     .input("id", sql.Char(36), id)
     .query(
-      "UPDATE dbo.Outbox SET LeaseUntil=DATEADD(SECOND,-1,SYSUTCDATETIME()) WHERE AllocationId=@id",
+      "UPDATE dbo.Outbox SET LockedUntilUtc=DATEADD(SECOND,-1,SYSUTCDATETIME()), LeaseUntil=DATEADD(SECOND,-1,SYSUTCDATETIME()) WHERE AllocationId=@id",
     );
   const second = (await store.claim())!;
   assert.notEqual(first.token, second.token);
+  assert.equal(second.fencingToken, 2);
   await store.finish(first, {
     status: "POSTED",
     reason: "STALE",
@@ -70,6 +77,7 @@ try {
   assert.equal((await store.get(id))!.status, "AWAITING_BATCH");
   await store.wake(id);
   const finalJob = (await store.claim())!;
+  assert.equal(finalJob.fencingToken, 3);
   await store.finish(finalJob, {
     status: "POSTED",
     reason: "OK",
@@ -88,11 +96,50 @@ try {
     .input("id", sql.Char(36), id)
     .input("token", sql.Char(36), staleToken)
     .query(
-      "UPDATE dbo.Outbox SET LeaseToken=@token,LeaseUntil=DATEADD(SECOND,60,SYSUTCDATETIME()),DueAt=SYSUTCDATETIME() WHERE AllocationId=@id",
+      "UPDATE dbo.Outbox SET Status='CLAIMED', LeaseToken=@token, LockedUntilUtc=DATEADD(SECOND,60,SYSUTCDATETIME()), LeaseUntil=DATEADD(SECOND,60,SYSUTCDATETIME()), NextAttemptAtUtc=SYSUTCDATETIME(), DueAt=SYSUTCDATETIME() WHERE AllocationId=@id",
     );
-  await store.retry({ id, token: staleToken, failures: 0 }, "LEGACY_OFFLINE");
+  await store.retry(
+    { id, token: staleToken, fencingToken: finalJob.fencingToken, failures: 0 },
+    "LEGACY_OFFLINE",
+  );
   assert.equal((await store.get(id))!.status, "POSTED");
   assert.equal((await store.get(id))!.postingId, id);
+
+  // Database-level FSM trigger: terminal POSTED rows can never regress.
+  await assert.rejects(
+    () =>
+      pool
+        .request()
+        .input("id", sql.Char(36), id)
+        .query("UPDATE dbo.Allocations SET Status='QUEUED' WHERE Id=@id"),
+    /Terminal allocation status/,
+  );
+
+  // IETF Idempotency-Key lock table: IN_PROGRESS -> 409, mismatch -> 422, COMPLETED -> replay.
+  const idemKey = randomUUID();
+  const fpA = "a".repeat(64);
+  const fpB = "b".repeat(64);
+  assert.deepEqual(
+    await store.acquireIdempotency(client, idemKey, fpA, 86_400),
+    { kind: "ACQUIRED" },
+  );
+  assert.deepEqual(
+    await store.acquireIdempotency(client, idemKey, fpA, 86_400),
+    { kind: "IN_PROGRESS" },
+  );
+  assert.deepEqual(
+    await store.acquireIdempotency(client, idemKey, fpB, 86_400),
+    { kind: "MISMATCH" },
+  );
+  await store.completeIdempotency(client, idemKey, 202, { id, ok: true }, id);
+  assert.deepEqual(
+    await store.acquireIdempotency(client, idemKey, fpA, 86_400),
+    { kind: "REPLAY", statusCode: 202, body: { id, ok: true } },
+  );
+  assert.deepEqual(
+    await store.acquireIdempotency(client, idemKey, fpB, 86_400),
+    { kind: "MISMATCH" },
+  );
   const observedAt = new Date().toISOString();
   const snapshot = {
     generation: "gen-new",
@@ -194,7 +241,7 @@ try {
   );
   await pool.request().input("client", sql.VarChar(30), client)
     .query(`UPDATE dbo.Allocations SET Status='POSTED',PostingId=Id WHERE ClientId=@client AND TargetAccount='${SETTLEMENT_ACCOUNT}';
-      UPDATE o SET DueAt=NULL FROM dbo.Outbox o JOIN dbo.Allocations a ON a.Id=o.AllocationId WHERE a.ClientId=@client;`);
+      UPDATE o SET Status='COMPLETED',NextAttemptAtUtc=NULL,DueAt=NULL FROM dbo.Outbox o JOIN dbo.Allocations a ON a.Id=o.AllocationId WHERE a.ClientId=@client;`);
   const fileKey = randomUUID();
   const generated = await Promise.all([
     generateFile(store, client, fileKey),
@@ -267,15 +314,61 @@ try {
   );
   const scanned = await store.scanPayouts(client);
   assert.deepEqual(
-    [scanned.payouts.length, scanned.files.length, scanned.truncated],
-    [2, 1, false],
+    [
+      scanned.payouts.length,
+      scanned.files.length,
+      scanned.bankResponses.length,
+      scanned.truncated,
+    ],
+    [2, 1, 1, false],
+  );
+
+  // Maker-checker DB CHECK constraint and cryptographic approval hash integrity
+  const mcPayout = await store.createPayout(client, randomUUID(), {
+    ...payoutInput,
+    amountMinor: 10_000,
+  });
+  await pool
+    .request()
+    .input("id", sql.Char(36), mcPayout.id)
+    .query(
+      "UPDATE dbo.Allocations SET Status='POSTED',PostingId=Id WHERE Id=@id; UPDATE dbo.Outbox SET Status='COMPLETED',NextAttemptAtUtc=NULL,DueAt=NULL WHERE AllocationId=@id;",
+    );
+  const mcFile = (await generateFile(
+    store,
+    client,
+    randomUUID(),
+    new Date(),
+    "ops",
+    1,
+  ))!;
+  assert.equal(mcFile.status, "AWAITING_APPROVAL");
+  assert.ok(mcFile.approvalHash);
+  // Direct SQL self-approval violates CK_PayoutFiles_MakerChecker CHECK constraint
+  await assert.rejects(
+    () =>
+      pool
+        .request()
+        .input("id", sql.Char(36), mcFile.id)
+        .query("UPDATE dbo.PayoutFiles SET ApprovedBy=CreatedBy WHERE Id=@id"),
+    /CK_PayoutFiles_MakerChecker/,
+  );
+  // Mutating instruction bank account breaks cryptographic ApprovalHash on approval
+  await pool
+    .request()
+    .input("id", sql.Char(36), mcPayout.id)
+    .query("UPDATE dbo.PayoutInstructions SET BankAccount='99999999999' WHERE Id=@id");
+  await assert.rejects(
+    () => store.approvePayoutFile(client, mcFile.id, "ops-two"),
+    ApprovalIntegrityError,
   );
   console.log(
-    "PASS SQL atomic create, replay/conflict, lease fencing, immutable final status, stale account snapshot rejection, persisted reconciliation, idempotent payout instructions, one-file-per-payout generation, and once-only bank response processing.",
+    "PASS SQL atomic create, replay/conflict, lease fencing, immutable final status, stale account snapshot rejection, persisted reconciliation, idempotent payout instructions, one-file-per-payout generation, maker-checker DB check + approval hash, and once-only bank response processing.",
   );
 } finally {
   await pool.request().input("client", sql.VarChar(30), client)
-    .query(`DELETE dbo.PayoutInstructions WHERE ClientId=@client;
+    .query(`DELETE dbo.IdempotencyKeys WHERE ClientId=@client;
+    DELETE dbo.PayoutInstructions WHERE ClientId=@client;
     DELETE b FROM dbo.BankResponses b JOIN dbo.PayoutFiles f ON f.Id=b.PayoutFileId WHERE f.ClientId=@client;
     DELETE dbo.PayoutFiles WHERE ClientId=@client;
     DELETE e FROM dbo.AllocationEvents e JOIN dbo.Allocations a ON a.Id=e.AllocationId WHERE a.ClientId=@client;

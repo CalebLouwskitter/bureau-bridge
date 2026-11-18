@@ -8,6 +8,7 @@ use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
+use StaleFencingTokenException;
 
 final class LibTest extends TestCase
 {
@@ -254,5 +255,73 @@ final class LibTest extends TestCase
         $this->assertStringContainsString("'@malicious", $csv);
         $this->assertStringContainsString("'\tcmd", $csv);
         $this->assertStringContainsString('"safe,value"', $csv);
+    }
+
+    public function testParseFencingTokenAcceptsValidPositiveIntegersAndNull(): void
+    {
+        $this->assertNull(parse_fencing_token(null));
+        $this->assertNull(parse_fencing_token(''));
+        $this->assertNull(parse_fencing_token('   '));
+        $this->assertSame(1, parse_fencing_token('1'));
+        $this->assertSame(42, parse_fencing_token(' 42 '));
+        $this->assertSame(9999999999, parse_fencing_token('9999999999'));
+    }
+
+    #[DataProvider('invalidFencingTokenProvider')]
+    public function testParseFencingTokenRejectsInvalidValues(string $raw): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        parse_fencing_token($raw);
+    }
+
+    /**
+     * @return list<array{string}>
+     */
+    public static function invalidFencingTokenProvider(): array
+    {
+        return [
+            ['0'],
+            ['-1'],
+            ['abc'],
+            ['1.5'],
+            ['01'],
+            ['12345678901234567890'],
+        ];
+    }
+
+    public function testAssertFencingTokenRejectsLowerTokenAndAllowsEqualOrHigher(): void
+    {
+        assert_fencing_token(null, 5);
+        assert_fencing_token(5, 5);
+        assert_fencing_token(6, 5);
+
+        $this->expectException(StaleFencingTokenException::class);
+        assert_fencing_token(4, 5);
+    }
+
+    public function testAssertValidLegacyTransitionAllowsForwardAndBlocksTerminalRegression(): void
+    {
+        assert_valid_legacy_transition('RECEIVED', 'BATCHED');
+        assert_valid_legacy_transition('BATCHED', 'VERIFYING');
+        assert_valid_legacy_transition('VERIFYING', 'POSTED');
+        assert_valid_legacy_transition('VERIFYING', 'RECEIVED');
+        assert_valid_legacy_transition('POSTED', 'POSTED');
+
+        $this->expectException(DomainException::class);
+        assert_valid_legacy_transition('POSTED', 'VERIFYING');
+    }
+
+    public function testW3cTraceparentParsingAndGeneration(): void
+    {
+        $valid = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01';
+        $this->assertSame($valid, parse_traceparent($valid));
+        $this->assertSame('4bf92f3577b34da6a3ce929d0e0e4736', trace_id_from_traceparent($valid));
+        $this->assertNull(parse_traceparent('ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'));
+        $this->assertNull(parse_traceparent('00-' . str_repeat('0', 32) . '-00f067aa0ba902b7-01'));
+        $this->assertNull(parse_traceparent('00-4bf92f3577b34da6a3ce929d0e0e4736-' . str_repeat('0', 16) . '-01'));
+
+        $generated = ensure_traceparent('invalid');
+        $this->assertNotNull(parse_traceparent($generated));
+        $this->assertSame(32, strlen((string)trace_id_from_traceparent($generated)));
     }
 }

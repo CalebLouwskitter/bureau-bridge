@@ -4,8 +4,13 @@ require getenv('LEGACY_LIB') ?: (is_file(__DIR__.'/../legacy/php/lib.php') ? __D
 function check(bool $condition,string $message): void { if (!$condition) throw new RuntimeException($message); }
 function sample(): array { return ['reference'=>uuid(),'sourceAccount'=>'INS000000001','targetAccount'=>'EMP000000001','amountMinor'=>25000,'currency'=>'ZAR']; }
 $first=sample();
-check(intake($first)['status']==='RECEIVED','Intake failed');
-check(intake($first)['reference']===$first['reference'],'Replay must preserve reference');
+$trace='00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01';
+check(intake($first, 1, $trace)['status']==='RECEIVED','Intake failed');
+check(intake($first, 1, $trace)['traceparent']===$trace,'Traceparent must persist on intake');
+check(intake($first, 1)['reference']===$first['reference'],'Replay must preserve reference');
+check(intake($first, 2)['fencingToken']===2,'Higher fencing token must advance recorded token');
+try { intake($first, 1); throw new RuntimeException('Stale fencing token was accepted'); }
+catch (StaleFencingTokenException $e) { /* Expected stale fencing token rejection. */ }
 try { intake([...$first,'amountMinor'=>26000]); throw new RuntimeException('Conflict was accepted'); }
 catch (DomainException $e) { /* Expected conflict. */ }
 batch();

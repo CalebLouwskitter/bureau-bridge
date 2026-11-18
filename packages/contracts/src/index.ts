@@ -46,6 +46,7 @@ export interface Allocation extends AllocationInput {
   status: Status;
   reason: string | null;
   postingId: string | null;
+  traceparent?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -71,9 +72,15 @@ export interface AccountSnapshot {
   observedAt: string;
   balances: Omit<AccountProjection, "generation" | "sequence" | "observedAt">[];
 }
+export type VarianceCategory =
+  | "TIMING_GAP"
+  | "UNMATCHED_LEG"
+  | "AMOUNT_OR_HASH_MISMATCH"
+  | "INFO";
 export interface ReconciliationFinding {
   severity: "HIGH" | "WARN" | "INFO";
   code: string;
+  category?: VarianceCategory;
   reference: string | null;
   details: string;
 }
@@ -139,6 +146,7 @@ export interface PayoutFile {
   createdBy?: string | null;
   approvedBy?: string | null;
   approvedAt?: string | null;
+  approvalHash?: string | null;
 }
 export function payoutStatus(
   p: Pick<Payout, "debitStatus" | "fileId" | "bankOutcome" | "returnStatus">,
