@@ -18,6 +18,77 @@ export interface BankDetails {
 }
 
 export class Conflict extends Error {}
+export class IdempotencyPayloadMismatch extends Conflict {}
+export class IdempotencyInProgress extends Conflict {}
+export class InvalidStateTransition extends Error {}
+
+export const DEFAULT_IDEMPOTENCY_TTL_SECONDS = 86_400; // 24 hours
+
+export const ALLOWED_ALLOCATION_TRANSITIONS: Readonly<
+  Record<Status, readonly Status[]>
+> = {
+  QUEUED: [
+    "AWAITING_BATCH",
+    "PROCESSING",
+    "VERIFYING",
+    "POSTED",
+    "DECLINED",
+    "NEEDS_REVIEW",
+  ],
+  AWAITING_BATCH: [
+    "PROCESSING",
+    "VERIFYING",
+    "POSTED",
+    "DECLINED",
+    "NEEDS_REVIEW",
+  ],
+  PROCESSING: ["VERIFYING", "POSTED", "DECLINED", "NEEDS_REVIEW"],
+  VERIFYING: [
+    "AWAITING_BATCH",
+    "PROCESSING",
+    "POSTED",
+    "DECLINED",
+    "NEEDS_REVIEW",
+  ],
+  NEEDS_REVIEW: [
+    "AWAITING_BATCH",
+    "PROCESSING",
+    "VERIFYING",
+    "POSTED",
+    "DECLINED",
+  ],
+  POSTED: [],
+  DECLINED: [],
+};
+
+export function isValidAllocationTransition(from: Status, to: Status): boolean {
+  if (from === to) return true;
+  return ALLOWED_ALLOCATION_TRANSITIONS[from].includes(to);
+}
+
+export type IdempotencyAcquireResult =
+  | { kind: "ACQUIRED" }
+  | { kind: "IN_PROGRESS" }
+  | { kind: "MISMATCH" }
+  | { kind: "REPLAY"; statusCode: number; body: unknown };
+
+export interface IdempotencyRecordStore {
+  acquireIdempotency(
+    clientId: string,
+    key: string,
+    fingerprint: string,
+    ttlSeconds?: number,
+  ): Promise<IdempotencyAcquireResult>;
+  completeIdempotency(
+    clientId: string,
+    key: string,
+    statusCode: number,
+    body: unknown,
+    allocationId?: string,
+  ): Promise<void>;
+  releaseIdempotency(clientId: string, key: string): Promise<void>;
+}
+
 export interface Job {
   id: string;
   token: string;
@@ -29,7 +100,7 @@ export interface Outcome {
   reason: string | null;
   postingId: string | null;
 }
-export interface Store {
+export interface Store extends Partial<IdempotencyRecordStore> {
   create(
     clientId: string,
     key: string,
@@ -134,9 +205,87 @@ export class SqlStore implements Store {
           "SELECT * FROM dbo.Allocations WHERE ClientId=@client AND IdempotencyKey=@key",
         );
       if (!found.recordset[0] || found.recordset[0].Fingerprint !== fingerprint)
-        throw new Conflict("Idempotency key reused with different data");
+        throw new IdempotencyPayloadMismatch(
+          "Idempotency key reused with different data",
+        );
       return map(found.recordset[0]);
     }
+  }
+  async acquireIdempotency(
+    clientId: string,
+    key: string,
+    fingerprint: string,
+    ttlSeconds = DEFAULT_IDEMPOTENCY_TTL_SECONDS,
+  ): Promise<IdempotencyAcquireResult> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await this.pool
+          .request()
+          .input("client", sql.VarChar(30), clientId)
+          .input("key", sql.Char(36), key)
+          .input("hash", sql.Char(64), fingerprint)
+          .input("ttl", sql.Int, ttlSeconds).query(`
+            SET XACT_ABORT ON;
+            DELETE FROM dbo.IdempotencyKeys
+              WHERE ClientId = @client AND IdempotencyKey = @key AND ExpiresAt <= SYSUTCDATETIME();
+            INSERT dbo.IdempotencyKeys (ClientId, IdempotencyKey, Fingerprint, State, ExpiresAt)
+            VALUES (@client, @key, @hash, 'IN_PROGRESS', DATEADD(SECOND, @ttl, SYSUTCDATETIME()));`);
+        return { kind: "ACQUIRED" };
+      } catch (error: any) {
+        if (![2601, 2627].includes(error.number)) throw error;
+        const found = await this.pool
+          .request()
+          .input("client", sql.VarChar(30), clientId)
+          .input("key", sql.Char(36), key)
+          .query(
+            `SELECT Fingerprint, State, ResponseStatus, ResponseBody,
+                    CASE WHEN ExpiresAt <= SYSUTCDATETIME() THEN 1 ELSE 0 END AS Expired
+             FROM dbo.IdempotencyKeys
+             WHERE ClientId = @client AND IdempotencyKey = @key`,
+          );
+        const row = found.recordset[0];
+        if (!row || row.Expired) continue;
+        if (row.Fingerprint !== fingerprint) return { kind: "MISMATCH" };
+        if (row.State === "IN_PROGRESS") return { kind: "IN_PROGRESS" };
+        return {
+          kind: "REPLAY",
+          statusCode: Number(row.ResponseStatus),
+          body: JSON.parse(row.ResponseBody),
+        };
+      }
+    }
+    return { kind: "IN_PROGRESS" };
+  }
+  async completeIdempotency(
+    clientId: string,
+    key: string,
+    statusCode: number,
+    body: unknown,
+    allocationId?: string,
+  ): Promise<void> {
+    await this.pool
+      .request()
+      .input("client", sql.VarChar(30), clientId)
+      .input("key", sql.Char(36), key)
+      .input("statusCode", sql.Int, statusCode)
+      .input("body", sql.NVarChar(sql.MAX), JSON.stringify(body))
+      .input("allocationId", sql.Char(36), allocationId ?? null).query(`
+        UPDATE dbo.IdempotencyKeys
+          SET State = 'COMPLETED',
+              ResponseStatus = @statusCode,
+              ResponseBody = @body,
+              AllocationId = @allocationId,
+              UpdatedAt = SYSUTCDATETIME()
+          WHERE ClientId = @client AND IdempotencyKey = @key;`);
+  }
+  async releaseIdempotency(clientId: string, key: string): Promise<void> {
+    await this.pool
+      .request()
+      .input("client", sql.VarChar(30), clientId)
+      .input("key", sql.Char(36), key)
+      .query(
+        "DELETE FROM dbo.IdempotencyKeys WHERE ClientId = @client AND IdempotencyKey = @key AND State = 'IN_PROGRESS'",
+      );
   }
   async list(clientId: string, employee?: string) {
     const result = await this.pool
@@ -448,7 +597,80 @@ export interface MemoryOutboxRow {
   lastError: string | null;
 }
 
-export class MemoryStore implements Store {
+export class MemoryIdempotencyStore implements IdempotencyRecordStore {
+  readonly records = new Map<
+    string,
+    {
+      fingerprint: string;
+      state: "IN_PROGRESS" | "COMPLETED";
+      statusCode: number | null;
+      body: string | null;
+      allocationId: string | null;
+      expiresAt: number;
+    }
+  >();
+
+  constructor(private readonly now: () => number = () => Date.now()) {}
+
+  async acquireIdempotency(
+    clientId: string,
+    key: string,
+    fingerprint: string,
+    ttlSeconds = DEFAULT_IDEMPOTENCY_TTL_SECONDS,
+  ): Promise<IdempotencyAcquireResult> {
+    const composite = `${clientId}:${key}`;
+    const current = this.now();
+    const existing = this.records.get(composite);
+    if (existing && existing.expiresAt <= current) {
+      this.records.delete(composite);
+    }
+    const active = this.records.get(composite);
+    if (!active) {
+      this.records.set(composite, {
+        fingerprint,
+        state: "IN_PROGRESS",
+        statusCode: null,
+        body: null,
+        allocationId: null,
+        expiresAt: current + ttlSeconds * 1000,
+      });
+      return { kind: "ACQUIRED" };
+    }
+    if (active.fingerprint !== fingerprint) return { kind: "MISMATCH" };
+    if (active.state === "IN_PROGRESS") return { kind: "IN_PROGRESS" };
+    return {
+      kind: "REPLAY",
+      statusCode: active.statusCode!,
+      body: JSON.parse(active.body!),
+    };
+  }
+
+  async completeIdempotency(
+    clientId: string,
+    key: string,
+    statusCode: number,
+    body: unknown,
+    allocationId?: string,
+  ): Promise<void> {
+    const composite = `${clientId}:${key}`;
+    const existing = this.records.get(composite);
+    if (!existing) return;
+    existing.state = "COMPLETED";
+    existing.statusCode = statusCode;
+    existing.body = JSON.stringify(body);
+    existing.allocationId = allocationId ?? null;
+  }
+
+  async releaseIdempotency(clientId: string, key: string): Promise<void> {
+    const composite = `${clientId}:${key}`;
+    const existing = this.records.get(composite);
+    if (existing && existing.state === "IN_PROGRESS") {
+      this.records.delete(composite);
+    }
+  }
+}
+
+export class MemoryStore implements Store, IdempotencyRecordStore {
   readonly allocations = new Map<string, Allocation>();
   readonly byKey = new Map<string, { id: string; fingerprint: string }>();
   readonly outbox = new Map<string, MemoryOutboxRow>();
@@ -458,8 +680,85 @@ export class MemoryStore implements Store {
   >();
   readonly accountSnapshots = new Map<string, AccountProjection[]>();
   readonly reconciliations = new Map<string, ReconciliationRun[]>();
+  readonly idempotency: MemoryIdempotencyStore;
 
-  constructor(private readonly now: () => number = () => Date.now()) {}
+  constructor(private readonly now: () => number = () => Date.now()) {
+    this.idempotency = new MemoryIdempotencyStore(now);
+  }
+
+  acquireIdempotency(
+    clientId: string,
+    key: string,
+    fingerprint: string,
+    ttlSeconds?: number,
+  ): Promise<IdempotencyAcquireResult> {
+    return this.idempotency.acquireIdempotency(
+      clientId,
+      key,
+      fingerprint,
+      ttlSeconds,
+    );
+  }
+
+  completeIdempotency(
+    clientId: string,
+    key: string,
+    statusCode: number,
+    body: unknown,
+    allocationId?: string,
+  ): Promise<void> {
+    return this.idempotency.completeIdempotency(
+      clientId,
+      key,
+      statusCode,
+      body,
+      allocationId,
+    );
+  }
+
+  releaseIdempotency(clientId: string, key: string): Promise<void> {
+    return this.idempotency.releaseIdempotency(clientId, key);
+  }
+
+  transitionStatus(
+    id: string,
+    nextStatus: Status,
+    reason: string | null,
+    postingId: string | null,
+  ): void {
+    const a = this.allocations.get(id);
+    if (!a) return;
+    if (["POSTED", "DECLINED"].includes(a.status)) {
+      if (a.status !== nextStatus || a.postingId !== postingId) {
+        throw new InvalidStateTransition(
+          `Terminal allocation status (${a.status}) cannot regress to ${nextStatus}`,
+        );
+      }
+      return;
+    }
+    if (!isValidAllocationTransition(a.status, nextStatus)) {
+      throw new InvalidStateTransition(
+        `Invalid allocation state transition: ${a.status} -> ${nextStatus}`,
+      );
+    }
+    if (nextStatus === "POSTED" && postingId !== a.id) {
+      throw new InvalidStateTransition("POSTED requires postingId === id");
+    }
+    if (nextStatus === "DECLINED" && postingId !== null) {
+      throw new InvalidStateTransition("DECLINED requires postingId === null");
+    }
+    if (a.status !== nextStatus) {
+      this.eventLog.get(id)?.push({
+        status: nextStatus,
+        reason,
+        createdAt: new Date(this.now()).toISOString(),
+      });
+    }
+    a.status = nextStatus;
+    a.reason = reason;
+    a.postingId = postingId;
+    a.updatedAt = new Date(this.now()).toISOString();
+  }
 
   async create(
     clientId: string,
@@ -471,7 +770,9 @@ export class MemoryStore implements Store {
     const existing = this.byKey.get(composite);
     if (existing) {
       if (existing.fingerprint !== fp)
-        throw new Conflict("Idempotency key reused with different data");
+        throw new IdempotencyPayloadMismatch(
+          "Idempotency key reused with different data",
+        );
       return { ...this.allocations.get(existing.id)! };
     }
     const id = randomUUID();
@@ -586,17 +887,7 @@ export class MemoryStore implements Store {
       row.nextAttemptAtUtc = null;
       return;
     }
-    if (a.status !== outcome.status) {
-      this.eventLog.get(job.id)?.push({
-        status: outcome.status,
-        reason: outcome.reason,
-        createdAt: new Date(this.now()).toISOString(),
-      });
-    }
-    a.status = outcome.status;
-    a.reason = outcome.reason;
-    a.postingId = outcome.postingId;
-    a.updatedAt = new Date(this.now()).toISOString();
+    this.transitionStatus(job.id, outcome.status, outcome.reason, outcome.postingId);
   }
 
   async retry(job: Job, reason: string): Promise<void> {
@@ -624,16 +915,7 @@ export class MemoryStore implements Store {
       row.nextAttemptAtUtc = null;
       return;
     }
-    if (a.status !== status) {
-      this.eventLog.get(job.id)?.push({
-        status,
-        reason: row.lastError,
-        createdAt: new Date(this.now()).toISOString(),
-      });
-    }
-    a.status = status;
-    a.reason = row.lastError;
-    a.updatedAt = new Date(this.now()).toISOString();
+    this.transitionStatus(job.id, status, row.lastError, a.postingId);
   }
 
   async deadLetter(job: Job, reason: string): Promise<void> {
@@ -656,16 +938,7 @@ export class MemoryStore implements Store {
       row.status = "COMPLETED";
       return;
     }
-    if (a.status !== "NEEDS_REVIEW") {
-      this.eventLog.get(job.id)?.push({
-        status: "NEEDS_REVIEW",
-        reason: row.lastError,
-        createdAt: new Date(this.now()).toISOString(),
-      });
-    }
-    a.status = "NEEDS_REVIEW";
-    a.reason = row.lastError;
-    a.updatedAt = new Date(this.now()).toISOString();
+    this.transitionStatus(job.id, "NEEDS_REVIEW", row.lastError, null);
   }
 
   async wake(id: string): Promise<void> {

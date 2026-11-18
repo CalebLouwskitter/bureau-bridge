@@ -2,7 +2,15 @@ import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { parseAllocation, UUID, type Principal } from "@bureau/contracts";
-import { Conflict, type Store } from "./store.ts";
+import {
+  Conflict,
+  DEFAULT_IDEMPOTENCY_TTL_SECONDS,
+  IdempotencyPayloadMismatch,
+  MemoryIdempotencyStore,
+  type IdempotencyRecordStore,
+  type Store,
+} from "./store.ts";
+import { fingerprint } from "./ids.ts";
 import type { Legacy } from "./legacy.ts";
 import { equal, issue, verify } from "./auth.ts";
 import { reconcile, reportCsv } from "./reconciliation.ts";
@@ -35,8 +43,18 @@ export function makeApp(
     health?: () => Promise<void>;
     logger?: boolean;
     payouts?: { store: PayoutStore; bank: Bank };
+    idempotencyTtlSeconds?: number;
   },
 ) {
+  const fallbackIdempotency = new MemoryIdempotencyStore();
+  const idempotencyStore: IdempotencyRecordStore =
+    store.acquireIdempotency &&
+    store.completeIdempotency &&
+    store.releaseIdempotency
+      ? (store as IdempotencyRecordStore)
+      : fallbackIdempotency;
+  const idempotencyTtlSeconds =
+    options.idempotencyTtlSeconds ?? DEFAULT_IDEMPOTENCY_TTL_SECONDS;
   const app = Fastify({
     bodyLimit: 8192,
     logger: options.logger
@@ -148,10 +166,49 @@ export function makeApp(
     } catch (error) {
       return reply.code(400).send({ error: (error as Error).message });
     }
+    const fp = fingerprint(input);
+    const acquired = await idempotencyStore.acquireIdempotency(
+      p.clientId,
+      key,
+      fp,
+      idempotencyTtlSeconds,
+    );
+    if (acquired.kind === "MISMATCH") {
+      return reply.code(422).send({
+        error: "Idempotency-Key reused with a different request payload",
+        code: "IDEMPOTENCY_PAYLOAD_MISMATCH",
+      });
+    }
+    if (acquired.kind === "IN_PROGRESS") {
+      return reply.code(409).send({
+        error: "A request with this Idempotency-Key is currently in progress",
+        code: "IDEMPOTENCY_IN_PROGRESS",
+      });
+    }
+    if (acquired.kind === "REPLAY") {
+      return reply
+        .code(acquired.statusCode)
+        .header("Idempotency-Replayed", "true")
+        .send(acquired.body);
+    }
     try {
       const allocation = await store.create(p.clientId, key, input);
+      await idempotencyStore.completeIdempotency(
+        p.clientId,
+        key,
+        202,
+        allocation,
+        allocation.id,
+      );
       return reply.code(202).send(allocation);
     } catch (error) {
+      await idempotencyStore.releaseIdempotency(p.clientId, key).catch(() => {});
+      if (error instanceof IdempotencyPayloadMismatch) {
+        return reply.code(422).send({
+          error: error.message,
+          code: "IDEMPOTENCY_PAYLOAD_MISMATCH",
+        });
+      }
       if (error instanceof Conflict)
         return reply.code(409).send({ error: error.message });
       throw error;

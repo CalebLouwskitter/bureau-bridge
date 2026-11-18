@@ -53,7 +53,7 @@ const first = await submit(key);
 assert.equal(first.status, 202);
 const a = await first.json();
 assert.equal((await (await submit(key)).json()).id, a.id);
-assert.equal((await submit(key, { ...body, amountMinor: 25001 })).status, 409);
+assert.equal((await submit(key, { ...body, amountMinor: 25001 })).status, 422);
 await wait(a.id, ["AWAITING_BATCH"]);
 batch();
 await wait(a.id, ["POSTED"]);

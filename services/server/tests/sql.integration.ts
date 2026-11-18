@@ -99,6 +99,42 @@ try {
   );
   assert.equal((await store.get(id))!.status, "POSTED");
   assert.equal((await store.get(id))!.postingId, id);
+
+  // Database-level FSM trigger: terminal POSTED rows can never regress.
+  await assert.rejects(
+    () =>
+      pool
+        .request()
+        .input("id", sql.Char(36), id)
+        .query("UPDATE dbo.Allocations SET Status='QUEUED' WHERE Id=@id"),
+    /Terminal allocation status/,
+  );
+
+  // IETF Idempotency-Key lock table: IN_PROGRESS -> 409, mismatch -> 422, COMPLETED -> replay.
+  const idemKey = randomUUID();
+  const fpA = "a".repeat(64);
+  const fpB = "b".repeat(64);
+  assert.deepEqual(
+    await store.acquireIdempotency(client, idemKey, fpA, 86_400),
+    { kind: "ACQUIRED" },
+  );
+  assert.deepEqual(
+    await store.acquireIdempotency(client, idemKey, fpA, 86_400),
+    { kind: "IN_PROGRESS" },
+  );
+  assert.deepEqual(
+    await store.acquireIdempotency(client, idemKey, fpB, 86_400),
+    { kind: "MISMATCH" },
+  );
+  await store.completeIdempotency(client, idemKey, 202, { id, ok: true }, id);
+  assert.deepEqual(
+    await store.acquireIdempotency(client, idemKey, fpA, 86_400),
+    { kind: "REPLAY", statusCode: 202, body: { id, ok: true } },
+  );
+  assert.deepEqual(
+    await store.acquireIdempotency(client, idemKey, fpB, 86_400),
+    { kind: "MISMATCH" },
+  );
   const observedAt = new Date().toISOString();
   const snapshot = {
     generation: "gen-new",
@@ -281,7 +317,8 @@ try {
   );
 } finally {
   await pool.request().input("client", sql.VarChar(30), client)
-    .query(`DELETE dbo.PayoutInstructions WHERE ClientId=@client;
+    .query(`DELETE dbo.IdempotencyKeys WHERE ClientId=@client;
+    DELETE dbo.PayoutInstructions WHERE ClientId=@client;
     DELETE b FROM dbo.BankResponses b JOIN dbo.PayoutFiles f ON f.Id=b.PayoutFileId WHERE f.ClientId=@client;
     DELETE dbo.PayoutFiles WHERE ClientId=@client;
     DELETE e FROM dbo.AllocationEvents e JOIN dbo.Allocations a ON a.Id=e.AllocationId WHERE a.ClientId=@client;

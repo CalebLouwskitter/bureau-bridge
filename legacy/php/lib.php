@@ -69,6 +69,20 @@ function assert_fencing_token(?int $incoming, int $recorded): void {
     }
 }
 
+function assert_valid_legacy_transition(string $from, string $to): void {
+    if ($from === $to) return;
+    $allowed = [
+        'RECEIVED' => ['BATCHED', 'VERIFYING', 'POSTED', 'DECLINED'],
+        'BATCHED' => ['VERIFYING', 'POSTED', 'DECLINED'],
+        'VERIFYING' => ['RECEIVED', 'POSTED', 'DECLINED'],
+        'POSTED' => [],
+        'DECLINED' => [],
+    ];
+    if (!isset($allowed[$from]) || !in_array($to, $allowed[$from], true)) {
+        throw new DomainException(sprintf('Invalid legacy state transition: %s -> %s', $from, $to));
+    }
+}
+
 /**
  * @param array<string, mixed> $data
  * @return array<string, mixed>

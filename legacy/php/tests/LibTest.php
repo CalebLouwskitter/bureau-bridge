@@ -298,4 +298,16 @@ final class LibTest extends TestCase
         $this->expectException(StaleFencingTokenException::class);
         assert_fencing_token(4, 5);
     }
+
+    public function testAssertValidLegacyTransitionAllowsForwardAndBlocksTerminalRegression(): void
+    {
+        assert_valid_legacy_transition('RECEIVED', 'BATCHED');
+        assert_valid_legacy_transition('BATCHED', 'VERIFYING');
+        assert_valid_legacy_transition('VERIFYING', 'POSTED');
+        assert_valid_legacy_transition('VERIFYING', 'RECEIVED');
+        assert_valid_legacy_transition('POSTED', 'POSTED');
+
+        $this->expectException(DomainException::class);
+        assert_valid_legacy_transition('POSTED', 'VERIFYING');
+    }
 }
