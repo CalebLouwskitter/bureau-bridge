@@ -109,6 +109,82 @@ function trace_id_from_traceparent(?string $traceparent): ?string {
     return substr($valid, 3, 32);
 }
 
+function compute_content_digest(string $rawBody): string {
+    return 'sha-256=:' . base64_encode(hash('sha256', $rawBody, true)) . ':';
+}
+
+/**
+ * @return array{Content-Digest: string, Signature-Input: string, Signature: string}
+ */
+function sign_http_request(
+    string $method,
+    string $targetUri,
+    string $rawBody,
+    string $keyId,
+    string $secret,
+    ?int $created = null
+): array {
+    $ts = $created ?? time();
+    $digest = compute_content_digest($rawBody);
+    $sigParams = sprintf('("@method" "@target-uri" "content-digest");created=%d;keyid="%s";alg="hmac-sha256"', $ts, $keyId);
+    $base = '"@method": ' . strtoupper($method) . "\n"
+        . '"@target-uri": ' . $targetUri . "\n"
+        . '"content-digest": ' . $digest . "\n"
+        . '"@signature-params": ' . $sigParams;
+    $sig = 'sig1=:' . base64_encode(hash_hmac('sha256', $base, $secret, true)) . ':';
+    return [
+        'Content-Digest' => $digest,
+        'Signature-Input' => 'sig1=' . $sigParams,
+        'Signature' => $sig,
+    ];
+}
+
+function verify_http_signature(
+    string $method,
+    string $targetUri,
+    string $rawBody,
+    ?string $signatureInput,
+    ?string $signature,
+    ?string $contentDigest,
+    string $expectedKeyId,
+    string $secret,
+    ?int $now = null,
+    int $windowSeconds = 60
+): bool {
+    if ($signatureInput === null || $signature === null || $contentDigest === null) {
+        return false;
+    }
+    $sigInputTrimmed = trim($signatureInput);
+    $sigTrimmed = trim($signature);
+    $digestTrimmed = trim($contentDigest);
+    if ($sigInputTrimmed === '' || $sigTrimmed === '' || $digestTrimmed === '') {
+        return false;
+    }
+    if (!preg_match('/^sig1=(\("@method" "@target-uri" "content-digest"\);created=(\d{1,12});keyid="([a-z0-9_-]+)";alg="hmac-sha256")$/D', $sigInputTrimmed, $matches)) {
+        return false;
+    }
+    $sigParams = $matches[1];
+    $created = (int)$matches[2];
+    $keyId = $matches[3];
+    if (!hash_equals($expectedKeyId, $keyId)) {
+        return false;
+    }
+    $current = $now ?? time();
+    if (abs($current - $created) > $windowSeconds) {
+        return false;
+    }
+    $expectedDigest = compute_content_digest($rawBody);
+    if (!hash_equals($expectedDigest, $digestTrimmed)) {
+        return false;
+    }
+    $base = '"@method": ' . strtoupper($method) . "\n"
+        . '"@target-uri": ' . $targetUri . "\n"
+        . '"content-digest": ' . $digestTrimmed . "\n"
+        . '"@signature-params": ' . $sigParams;
+    $expectedSig = 'sig1=:' . base64_encode(hash_hmac('sha256', $base, $secret, true)) . ':';
+    return hash_equals($expectedSig, $sigTrimmed);
+}
+
 /**
  * @param array<string, mixed> $data
  * @return array<string, mixed>

@@ -12,7 +12,7 @@ import {
 } from "./store.ts";
 import { fingerprint } from "./ids.ts";
 import type { Legacy } from "./legacy.ts";
-import { equal, issue, verify } from "./auth.ts";
+import { equal, issue, JwtKeySet, verify } from "./auth.ts";
 import { reconcile, reportCsv } from "./reconciliation.ts";
 import {
   approveFile,
@@ -44,6 +44,7 @@ export function makeApp(
   legacy: Legacy,
   options: {
     sessionSecret: string;
+    jwtKeySet?: JwtKeySet;
     demoPassword: string;
     origins?: string[];
     health?: () => Promise<void>;
@@ -52,6 +53,8 @@ export function makeApp(
     idempotencyTtlSeconds?: number;
   },
 ) {
+  const jwtKeySet =
+    options.jwtKeySet ?? JwtKeySet.fromDemoSecret(options.sessionSecret);
   const fallbackIdempotency = new MemoryIdempotencyStore();
   const idempotencyStore: IdempotencyRecordStore =
     store.acquireIdempotency &&
@@ -84,12 +87,14 @@ export function makeApp(
     reply.header("traceparent", trace.raw);
     if (
       request.method === "OPTIONS" ||
-      ["/health", "/session"].includes(request.url.split("?")[0])
+      ["/health", "/session", "/.well-known/jwks.json"].includes(
+        request.url.split("?")[0],
+      )
     )
       return;
     const header = request.headers.authorization ?? "";
     const principal = header.startsWith("Bearer ")
-      ? verify(header.slice(7), options.sessionSecret)
+      ? verify(header.slice(7), jwtKeySet)
       : undefined;
     if (!principal)
       return reply.code(401).send({ error: "Sign in to continue" });
@@ -99,6 +104,7 @@ export function makeApp(
     await options.health?.();
     return { status: "ok", service: "bureau-api" };
   });
+  app.get("/.well-known/jwks.json", async () => jwtKeySet.publicJwks());
   app.post(
     "/session",
     { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
@@ -114,12 +120,12 @@ export function makeApp(
         !equal(body.password, options.demoPassword)
       )
         return reply.code(401).send({ error: "Invalid demo credentials" });
-      const token = issue(body.username, options.sessionSecret);
+      const token = issue(body.username, jwtKeySet);
       if (!token)
         return reply.code(401).send({ error: "Invalid demo credentials" });
       return {
         token,
-        principal: verify(token, options.sessionSecret),
+        principal: verify(token, jwtKeySet),
         expiresIn: 3600,
       };
     },

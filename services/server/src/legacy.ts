@@ -8,6 +8,7 @@ import {
   type CircuitBreakerOptions,
   type RetryPolicyOptions,
 } from "./resilience.ts";
+import { signHttpRequest } from "./http-signature.ts";
 export interface LegacyResult {
   reference: string;
   status: string;
@@ -71,12 +72,14 @@ export interface LegacyClientOptions {
   circuitBreaker?: CircuitBreaker | CircuitBreakerOptions;
   retry?: RetryPolicyOptions;
   fetch?: typeof globalThis.fetch;
+  now?: () => number;
 }
 export class LegacyClient implements Legacy {
   readonly breaker: CircuitBreaker;
   private readonly retryPolicy: RetryPolicyOptions;
   private readonly timeouts: Required<LegacyClientTimeouts>;
   private readonly fetchFn: typeof globalThis.fetch;
+  private readonly nowFn: () => number;
 
   constructor(
     private base: string,
@@ -108,6 +111,7 @@ export class LegacyClient implements Legacy {
       inventory: options.timeouts?.inventory ?? 10_000,
     };
     this.fetchFn = options.fetch ?? globalThis.fetch;
+    this.nowFn = options.now ?? (() => Date.now());
   }
   private async call(
     path: string,
@@ -117,20 +121,36 @@ export class LegacyClient implements Legacy {
     opts?: LegacyCallOptions,
     timeoutMs = this.timeouts.lookup,
   ) {
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${ops ? this.opsKey : this.bridgeKey}`,
-      "Content-Type": "application/json",
-    };
-    if (opts?.fencingToken !== undefined) {
-      headers["X-Fencing-Token"] = String(opts.fencingToken);
-    }
-    if (opts?.traceparent) {
-      headers["traceparent"] = opts.traceparent;
-    }
+    const targetUri = new URL(path, this.base.replace(/\/+$/, "") + "/").toString();
     const serializedBody = body !== undefined ? JSON.stringify(body) : undefined;
+    const keyId = ops ? "ops" : "bridge";
+    const secret = ops ? this.opsKey : this.bridgeKey;
+    if (!secret) {
+      throw new LegacyInvariantError(
+        ops ? "MISSING_LEGACY_OPS_KEY" : "MISSING_LEGACY_BRIDGE_KEY",
+      );
+    }
     return executeResilient(
       async (signal) => {
-        const response = await this.fetchFn(this.base + path, {
+        const signed = signHttpRequest({
+          method,
+          targetUri,
+          body: serializedBody ?? "",
+          keyId,
+          secret,
+          created: Math.floor(this.nowFn() / 1000),
+        });
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+          ...signed,
+        };
+        if (opts?.fencingToken !== undefined) {
+          headers["X-Fencing-Token"] = String(opts.fencingToken);
+        }
+        if (opts?.traceparent) {
+          headers["traceparent"] = opts.traceparent;
+        }
+        const response = await this.fetchFn(targetUri, {
           method,
           headers,
           body: serializedBody,
