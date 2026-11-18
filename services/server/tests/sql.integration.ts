@@ -5,7 +5,12 @@ import type { ReconciliationRun } from "@bureau/contracts";
 import { BANK_DETAILS, SETTLEMENT_ACCOUNT } from "@bureau/contracts";
 import { connection, Conflict } from "../src/store.ts";
 import { SqlPayoutStore } from "../src/payout-store.ts";
-import { generateFile, importResponse, submitFile } from "../src/payouts.ts";
+import {
+  ApprovalIntegrityError,
+  generateFile,
+  importResponse,
+  submitFile,
+} from "../src/payouts.ts";
 import { BankSimulator, MemoryLedger } from "../src/bank-sim.ts";
 import {
   buildResponse,
@@ -309,11 +314,56 @@ try {
   );
   const scanned = await store.scanPayouts(client);
   assert.deepEqual(
-    [scanned.payouts.length, scanned.files.length, scanned.truncated],
-    [2, 1, false],
+    [
+      scanned.payouts.length,
+      scanned.files.length,
+      scanned.bankResponses.length,
+      scanned.truncated,
+    ],
+    [2, 1, 1, false],
+  );
+
+  // Maker-checker DB CHECK constraint and cryptographic approval hash integrity
+  const mcPayout = await store.createPayout(client, randomUUID(), {
+    ...payoutInput,
+    amountMinor: 10_000,
+  });
+  await pool
+    .request()
+    .input("id", sql.Char(36), mcPayout.id)
+    .query(
+      "UPDATE dbo.Allocations SET Status='POSTED',PostingId=Id WHERE Id=@id; UPDATE dbo.Outbox SET Status='COMPLETED',NextAttemptAtUtc=NULL,DueAt=NULL WHERE AllocationId=@id;",
+    );
+  const mcFile = (await generateFile(
+    store,
+    client,
+    randomUUID(),
+    new Date(),
+    "ops",
+    1,
+  ))!;
+  assert.equal(mcFile.status, "AWAITING_APPROVAL");
+  assert.ok(mcFile.approvalHash);
+  // Direct SQL self-approval violates CK_PayoutFiles_MakerChecker CHECK constraint
+  await assert.rejects(
+    () =>
+      pool
+        .request()
+        .input("id", sql.Char(36), mcFile.id)
+        .query("UPDATE dbo.PayoutFiles SET ApprovedBy=CreatedBy WHERE Id=@id"),
+    /CK_PayoutFiles_MakerChecker/,
+  );
+  // Mutating instruction bank account breaks cryptographic ApprovalHash on approval
+  await pool
+    .request()
+    .input("id", sql.Char(36), mcPayout.id)
+    .query("UPDATE dbo.PayoutInstructions SET BankAccount='99999999999' WHERE Id=@id");
+  await assert.rejects(
+    () => store.approvePayoutFile(client, mcFile.id, "ops-two"),
+    ApprovalIntegrityError,
   );
   console.log(
-    "PASS SQL atomic create, replay/conflict, lease fencing, immutable final status, stale account snapshot rejection, persisted reconciliation, idempotent payout instructions, one-file-per-payout generation, and once-only bank response processing.",
+    "PASS SQL atomic create, replay/conflict, lease fencing, immutable final status, stale account snapshot rejection, persisted reconciliation, idempotent payout instructions, one-file-per-payout generation, maker-checker DB check + approval hash, and once-only bank response processing.",
   );
 } finally {
   await pool.request().input("client", sql.VarChar(30), client)

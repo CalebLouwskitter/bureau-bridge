@@ -11,7 +11,11 @@ import {
 } from "@bureau/contracts";
 import type { Legacy, LegacyInventory, LegacyResult } from "./legacy.ts";
 import type { Store } from "./store.ts";
-import { parseEft, parseResponse, sha256 } from "./eft.ts";
+import {
+  parseAnyBankResponse,
+  parseAnyPaymentFile,
+  sha256,
+} from "./eft.ts";
 import type {
   PayoutStore,
   StoredBankResponse,
@@ -404,7 +408,9 @@ function comparePayouts(
     if (f.status === "REJECTED") continue;
     let lines;
     try {
-      lines = new Map(parseEft(f.content).items.map((i) => [i.reference, i]));
+      lines = new Map(
+        parseAnyPaymentFile(f.content).items.map((i) => [i.reference, i]),
+      );
     } catch {
       lines = new Map();
     }
@@ -444,7 +450,7 @@ function comparePayouts(
       }
       let parsedResp;
       try {
-        parsedResp = parseResponse(br.content);
+        parsedResp = parseAnyBankResponse(br.content);
       } catch {
         add(
           "HIGH",
@@ -540,7 +546,7 @@ function comparePayouts(
     for (const br of scan.bankResponses) {
       if (br.status !== "ACCEPTED") continue;
       try {
-        const parsedResp = parseResponse(br.content);
+        const parsedResp = parseAnyBankResponse(br.content);
         for (const r of parsedResp.results) {
           const inst = payoutById.get(r.reference);
           if (inst && r.outcome === "PAID") {

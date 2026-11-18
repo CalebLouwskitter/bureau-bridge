@@ -4,7 +4,9 @@ import {
   actionDateFor,
   easterSunday,
   isBusinessDay,
+  isPublicHoliday,
   nextBusinessDay,
+  observedMondayForSundayHoliday,
   southAfricanPublicHolidays,
 } from "../src/business-calendar.ts";
 
@@ -202,4 +204,38 @@ test("extraHolidays: proclaimed one-off public holidays are honored without hard
     actionDateFor(new Date("2024-05-28T14:00:00Z"), { extraHolidays: extra }),
     "2024-05-30",
   );
+});
+
+test("Public Holidays Act Section 2(1): Sunday rollover across cut-off, year boundary, proclaimed holidays, and no Saturday rollover", () => {
+  // 1. New Year's Day 2023-01-01 fell on Sunday -> Monday 2023-01-02 observed holiday
+  assert.equal(observedMondayForSundayHoliday("2023-01-01"), "2023-01-02");
+  assert.equal(isPublicHoliday("2023-01-01"), true);
+  assert.equal(isPublicHoliday("2023-01-02"), true);
+  assert.equal(isBusinessDay("2023-01-02"), false);
+  // Friday 2022-12-30 at 15:00 local (13:00 UTC) rolls across Sat/Sun holiday/observed Mon -> Tue 2023-01-03
+  assert.equal(
+    actionDateFor(new Date("2022-12-30T13:00:00Z"), { cutOff: "15:00" }),
+    "2023-01-03",
+  );
+
+  // 2. Friday 2026-08-07 after 15:00 local rolls past Sat 08, Sun 09 (Women's Day), Mon 10 (observed) -> Tue 2026-08-11
+  assert.equal(
+    actionDateFor(new Date("2026-08-07T13:00:00Z"), { cutOff: "15:00" }),
+    "2026-08-11",
+  );
+
+  // 3. Saturday holidays do NOT roll to Monday under SA Public Holidays Act
+  // 2026-03-21 (Human Rights Day) is Saturday -> Monday 2026-03-23 IS a normal business day
+  assert.equal(observedMondayForSundayHoliday("2026-03-21"), null);
+  assert.equal(isPublicHoliday("2026-03-21"), true);
+  assert.equal(isPublicHoliday("2026-03-23"), false);
+  assert.equal(isBusinessDay("2026-03-23"), true);
+  assert.equal(nextBusinessDay("2026-03-20"), "2026-03-23");
+
+  // 4. Proclaimed extra holiday falling on Sunday rolls to Monday under Section 2(1)
+  // 2026-05-10 is Sunday -> Monday 2026-05-11 observed
+  const proclaimedSunday = ["2026-05-10"];
+  assert.equal(isPublicHoliday("2026-05-11", proclaimedSunday), true);
+  assert.equal(isBusinessDay("2026-05-11", proclaimedSunday), false);
+  assert.equal(nextBusinessDay("2026-05-08", proclaimedSunday), "2026-05-12");
 });

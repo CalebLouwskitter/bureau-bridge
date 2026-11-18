@@ -15,6 +15,7 @@ import type { Legacy } from "./legacy.ts";
 import { equal, issue, JwtKeySet, verify } from "./auth.ts";
 import { reconcile, reportCsv } from "./reconciliation.ts";
 import {
+  ApprovalIntegrityError,
   approveFile,
   BankUnavailable,
   FileAwaitingApproval,
@@ -27,7 +28,12 @@ import {
   type Bank,
   type PayoutStore,
 } from "./payouts.ts";
-import { EftError } from "./eft.ts";
+import {
+  EftError,
+  iso20022PainFormatter,
+  parseAnyPaymentFile,
+  sha256,
+} from "./eft.ts";
 import {
   createChildTraceparent,
   extractOrCreateTraceparent,
@@ -321,6 +327,13 @@ function registerPayouts(
   app: FastifyInstance,
   { store, bank }: { store: PayoutStore; bank: Bank },
 ) {
+  for (const xmlType of ["application/xml", "text/xml"]) {
+    app.addContentTypeParser(
+      xmlType,
+      { parseAs: "string" },
+      (_req, body, done) => done(null, body),
+    );
+  }
   const ops = (request: { principal?: Principal }) =>
     request.principal!.role === "ops";
   const fail = (error: unknown) => {
@@ -407,6 +420,29 @@ function registerPayouts(
         .send(file.content);
     },
   );
+  app.get<{ Params: { id: string } }>(
+    "/payout-files/:id/pain001.xml",
+    async (request, reply) => {
+      if (!ops(request))
+        return reply.code(403).send({ error: "Operations role required" });
+      const file = UUID.test(request.params.id)
+        ? await store.payoutFile(request.principal!.clientId, request.params.id)
+        : undefined;
+      if (!file)
+        return reply.code(404).send({ error: "Payout file not found" });
+      const xml = iso20022PainFormatter.buildPaymentFile(
+        parseAnyPaymentFile(file.content),
+      );
+      return reply
+        .type(iso20022PainFormatter.contentType)
+        .header("X-Content-SHA256", sha256(xml))
+        .header(
+          "Content-Disposition",
+          `attachment; filename="BUREAU01-${String(file.generation).padStart(6, "0")}.xml"`,
+        )
+        .send(xml);
+    },
+  );
   app.post<{ Params: { id: string } }>(
     "/payout-files/:id/approve",
     async (request, reply) => {
@@ -423,6 +459,11 @@ function registerPayouts(
         );
         return reply.code(200).send(file);
       } catch (error) {
+        if (error instanceof ApprovalIntegrityError) {
+          return reply
+            .code(409)
+            .send({ error: error.message, code: error.code });
+        }
         const [code, message] = fail(error);
         return reply.code(code).send({ error: message });
       }

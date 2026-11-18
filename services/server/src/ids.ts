@@ -31,3 +31,43 @@ export function deriveUuid(purpose: string, subject: string) {
 }
 export const returnKey = (payoutId: string) =>
   deriveUuid("bank-return", payoutId);
+
+export interface PayoutApprovalItem {
+  id: string;
+  amountMinor: number;
+  branch: string;
+  bankAccount: string;
+}
+
+/**
+ * Cryptographic SHA-256 approval hash over payout instruction identity, amount,
+ * and beneficiary bank account. Fails maker-checker approval if mutated.
+ */
+export function payoutInstructionApprovalHash(
+  item: PayoutApprovalItem,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        id: item.id,
+        amountMinor: item.amountMinor,
+        branch: item.branch,
+        bankAccount: item.bankAccount,
+      }),
+    )
+    .digest("hex");
+}
+
+export function payoutFileApprovalHash(
+  items: ReadonlyArray<PayoutApprovalItem>,
+): string {
+  const canonical = [...items]
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map((i) => ({
+      id: i.id,
+      amountMinor: i.amountMinor,
+      branch: i.branch,
+      bankAccount: i.bankAccount,
+    }));
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}

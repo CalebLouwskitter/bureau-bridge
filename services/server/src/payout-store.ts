@@ -9,9 +9,20 @@ import {
   type PayoutFile,
 } from "@bureau/contracts";
 import { Conflict, SqlStore } from "./store.ts";
-import { hashTotal, parseEft, sha256, type BankResponse } from "./eft.ts";
-import { fingerprint, returnKey } from "./ids.ts";
 import {
+  hashTotal,
+  parseAnyPaymentFile,
+  sha256,
+  type BankResponse,
+} from "./eft.ts";
+import {
+  fingerprint,
+  payoutFileApprovalHash,
+  payoutInstructionApprovalHash,
+  returnKey,
+} from "./ids.ts";
+import {
+  ApprovalIntegrityError,
   Forbidden,
   NotFound,
   payoutApprovalThresholdCents,
@@ -74,6 +85,7 @@ function mapFile(row: any): StoredPayoutFile {
       row.ApprovedAt instanceof Date
         ? row.ApprovedAt.toISOString()
         : (row.ApprovedAt ?? row.approvedAt ?? null),
+    approvalHash: row.ApprovalHash ?? row.approvalHash ?? null,
   };
 }
 const withoutContent = ({
@@ -156,7 +168,7 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
         }
         const rows = (
           await request()
-            .query(`SELECT TOP (500) i.Id,i.Branch,i.BankAccount,i.AmountMinor,i.Holder
+            .query(`SELECT TOP (500) i.Id,i.Branch,i.BankAccount,i.AmountMinor,i.Holder,i.ApprovalHash
             FROM dbo.PayoutInstructions i WITH (UPDLOCK,HOLDLOCK) JOIN dbo.Allocations a ON a.Id=i.Id
             WHERE i.ClientId=@client AND i.PayoutFileId IS NULL AND a.Status='POSTED' ORDER BY i.Id`)
         ).recordset;
@@ -164,6 +176,22 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
           await tx.commit();
           return undefined;
         }
+        const approvalItems = rows.map((r: any) => {
+          const item = {
+            id: r.Id as string,
+            amountMinor: Number(r.AmountMinor),
+            branch: r.Branch as string,
+            bankAccount: r.BankAccount as string,
+          };
+          const computed = payoutInstructionApprovalHash(item);
+          if (r.ApprovalHash && r.ApprovalHash !== computed) {
+            throw new ApprovalIntegrityError(
+              `Payout instruction ${item.id} mutated before file generation`,
+            );
+          }
+          return item;
+        });
+        const fileApprovalHash = payoutFileApprovalHash(approvalItems);
         const fileId = randomUUID();
         const content = build({
           fileId,
@@ -177,7 +205,7 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
           })),
         });
         // Check the built file the way the bank will before storing it.
-        const parsed = parseEft(content);
+        const parsed = parseAnyPaymentFile(content);
         const amountTotal = parsed.items.reduce((s, i) => s + i.amountMinor, 0);
         const status =
           amountTotal >= thresholdCents ? "AWAITING_APPROVAL" : "GENERATED";
@@ -192,13 +220,14 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
           .input("content", sql.VarChar(sql.MAX), content)
           .input("status", sql.VarChar(20), status)
           .input("createdBy", sql.VarChar(60), createdBy ?? null)
+          .input("approvalHash", sql.Char(64), fileApprovalHash)
           .input(
             "ids",
             sql.NVarChar(sql.MAX),
             JSON.stringify(rows.map((r: any) => r.Id)),
           )
-          .query(`INSERT dbo.PayoutFiles (Id,ClientId,IdempotencyKey,Generation,ActionDate,ItemCount,AmountTotal,HashTotal,Sha256,Content,Status,CreatedBy)
-            VALUES (@id,@client,@key,@generation,@date,@count,@amount,@hashTotal,@sha,@content,@status,@createdBy);
+          .query(`INSERT dbo.PayoutFiles (Id,ClientId,IdempotencyKey,Generation,ActionDate,ItemCount,AmountTotal,HashTotal,Sha256,Content,Status,CreatedBy,ApprovalHash)
+            VALUES (@id,@client,@key,@generation,@date,@count,@amount,@hashTotal,@sha,@content,@status,@createdBy,@approvalHash);
             UPDATE dbo.PayoutInstructions SET PayoutFileId=@id
               WHERE PayoutFileId IS NULL AND Id IN (SELECT value FROM OPENJSON(@ids));
             IF @@ROWCOUNT<>@count THROW 51000,'Payout instructions changed during file generation',1;`);
@@ -220,7 +249,7 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
       .input("client", sql.VarChar(30), clientId)
       .query(
         `SELECT TOP (100) Id,ClientId,Generation,ActionDate,ItemCount,AmountTotal,HashTotal,Sha256,Status,
-          CreatedAt,CreatedBy,ApprovedBy,ApprovedAt,'' AS Content FROM dbo.PayoutFiles WHERE ClientId=@client ORDER BY Generation DESC`,
+          CreatedAt,CreatedBy,ApprovedBy,ApprovedAt,ApprovalHash,'' AS Content FROM dbo.PayoutFiles WHERE ClientId=@client ORDER BY Generation DESC`,
       );
     return result.recordset.map((r: any) => withoutContent(mapFile(r)));
   }
@@ -253,6 +282,39 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
         throw new Forbidden("Creator cannot approve payout file");
       }
       if (row.Status === "AWAITING_APPROVAL") {
+        // Verify cryptographic approval hash over every instruction's amount & beneficiary account.
+        const instructions = (
+          await request().query(
+            `SELECT Id,AmountMinor,Branch,BankAccount,ApprovalHash
+             FROM dbo.PayoutInstructions WITH (UPDLOCK) WHERE PayoutFileId=@id`,
+          )
+        ).recordset;
+        const currentItems = instructions.map((r: any) => {
+          const item = {
+            id: r.Id as string,
+            amountMinor: Number(r.AmountMinor),
+            branch: r.Branch as string,
+            bankAccount: r.BankAccount as string,
+          };
+          if (
+            r.ApprovalHash &&
+            r.ApprovalHash !== payoutInstructionApprovalHash(item)
+          ) {
+            throw new ApprovalIntegrityError(
+              "Payout instruction mutated since creation; approval rejected",
+            );
+          }
+          return item;
+        });
+        if (
+          sha256(row.Content) !== row.Sha256 ||
+          (row.ApprovalHash &&
+            payoutFileApprovalHash(currentItems) !== row.ApprovalHash)
+        ) {
+          throw new ApprovalIntegrityError(
+            "Payout instructions mutated since file creation; approval rejected",
+          );
+        }
         await request()
           .input("approver", sql.VarChar(60), approver)
           .query(`UPDATE dbo.PayoutFiles
@@ -456,6 +518,7 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
 
 export class MemoryPayoutStore implements PayoutStore {
   readonly payouts = new Map<string, Payout>();
+  readonly instructionHashes = new Map<string, string>();
   readonly files = new Map<string, StoredPayoutFile>();
   readonly bankResponses = new Map<string, StoredBankResponse>();
   readonly idempotency = new Map<string, string>();
@@ -488,6 +551,15 @@ export class MemoryPayoutStore implements PayoutStore {
       createdAt: new Date().toISOString(),
     };
     this.payouts.set(id, p);
+    this.instructionHashes.set(
+      id,
+      payoutInstructionApprovalHash({
+        id: p.id,
+        amountMinor: p.amountMinor,
+        branch: p.branch,
+        bankAccount: p.bankAccount,
+      }),
+    );
     this.idempotency.set(`${clientId}:payout:${key}`, id);
     return p;
   }
@@ -520,6 +592,23 @@ export class MemoryPayoutStore implements PayoutStore {
     const generation =
       Array.from(this.files.values()).filter((f) => f.clientId === clientId)
         .length + 1;
+    const approvalHash = payoutFileApprovalHash(
+      ready.map((p) => {
+        const item = {
+          id: p.id,
+          amountMinor: p.amountMinor,
+          branch: p.branch,
+          bankAccount: p.bankAccount,
+        };
+        const recorded = this.instructionHashes.get(p.id);
+        if (recorded && recorded !== payoutInstructionApprovalHash(item)) {
+          throw new ApprovalIntegrityError(
+            `Payout instruction ${p.id} mutated before file generation`,
+          );
+        }
+        return item;
+      }),
+    );
     const items = ready.map((p) => ({
       reference: p.id,
       branch: p.branch,
@@ -528,7 +617,7 @@ export class MemoryPayoutStore implements PayoutStore {
       holder: p.holder,
     }));
     const content = build({ fileId, generation, items });
-    const parsed = parseEft(content);
+    const parsed = parseAnyPaymentFile(content);
     const amountTotal = parsed.items.reduce((s, i) => s + i.amountMinor, 0);
     const status =
       amountTotal >= thresholdCents ? "AWAITING_APPROVAL" : "GENERATED";
@@ -547,6 +636,7 @@ export class MemoryPayoutStore implements PayoutStore {
       createdBy: createdBy ?? null,
       approvedBy: null,
       approvedAt: null,
+      approvalHash,
     };
     for (const p of ready) {
       p.fileId = fileId;
@@ -584,6 +674,33 @@ export class MemoryPayoutStore implements PayoutStore {
       throw new Forbidden("Creator cannot approve payout file");
     }
     if (file.status === "AWAITING_APPROVAL") {
+      const members = Array.from(this.payouts.values()).filter(
+        (p) => p.fileId === file.id,
+      );
+      const currentItems = members.map((p) => {
+        const item = {
+          id: p.id,
+          amountMinor: p.amountMinor,
+          branch: p.branch,
+          bankAccount: p.bankAccount,
+        };
+        const recorded = this.instructionHashes.get(p.id);
+        if (recorded && recorded !== payoutInstructionApprovalHash(item)) {
+          throw new ApprovalIntegrityError(
+            "Payout instruction mutated since creation; approval rejected",
+          );
+        }
+        return item;
+      });
+      if (
+        sha256(file.content) !== file.sha256 ||
+        (file.approvalHash &&
+          payoutFileApprovalHash(currentItems) !== file.approvalHash)
+      ) {
+        throw new ApprovalIntegrityError(
+          "Payout instructions mutated since file creation; approval rejected",
+        );
+      }
       file.status = "GENERATED";
       file.approvedBy = approver;
       file.approvedAt = new Date().toISOString();

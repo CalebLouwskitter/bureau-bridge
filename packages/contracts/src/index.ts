@@ -146,6 +146,7 @@ export interface PayoutFile {
   createdBy?: string | null;
   approvedBy?: string | null;
   approvedAt?: string | null;
+  approvalHash?: string | null;
 }
 export function payoutStatus(
   p: Pick<Payout, "debitStatus" | "fileId" | "bankOutcome" | "returnStatus">,

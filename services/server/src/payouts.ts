@@ -9,11 +9,12 @@ import { PAYOUT_CUTOFF } from "./config.ts";
 import { actionDateFor } from "./business-calendar.ts";
 import { Conflict } from "./store.ts";
 import {
-  buildEft,
-  parseResponse,
+  bankservEftFormatter,
+  parseAnyBankResponse,
   USER_CODE,
   type BankResponse,
   type EftItem,
+  type PaymentRailFormatter,
 } from "./eft.ts";
 
 export const DEFAULT_APPROVAL_THRESHOLD_CENTS = 5000000;
@@ -107,6 +108,9 @@ export class Forbidden extends Error {}
 export class FileAwaitingApproval extends Conflict {
   readonly code = "FILE_AWAITING_APPROVAL";
 }
+export class ApprovalIntegrityError extends Conflict {
+  readonly code = "APPROVAL_HASH_MISMATCH";
+}
 
 export class BankClient implements Bank {
   constructor(
@@ -161,13 +165,19 @@ export function generateFile(
   now = new Date(),
   createdBy?: string,
   thresholdCents = payoutApprovalThresholdCents(),
+  formatter: PaymentRailFormatter = bankservEftFormatter,
 ) {
   const date = actionDate(now);
   return store.createPayoutFile(
     clientId,
     key,
     date,
-    (draft) => buildEft({ userCode: USER_CODE, actionDate: date, ...draft }),
+    (draft) =>
+      formatter.buildPaymentFile({
+        userCode: USER_CODE,
+        actionDate: date,
+        ...draft,
+      }),
     createdBy,
     thresholdCents,
   );
@@ -187,7 +197,11 @@ export async function importResponse(
   clientId: string,
   content: string,
 ) {
-  return store.importBankResponse(clientId, parseResponse(content), content);
+  return store.importBankResponse(
+    clientId,
+    parseAnyBankResponse(content),
+    content,
+  );
 }
 
 export async function submitFile(

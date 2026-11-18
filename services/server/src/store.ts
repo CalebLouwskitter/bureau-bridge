@@ -9,7 +9,10 @@ import type {
   ReconciliationRun,
 } from "@bureau/contracts";
 import { env } from "./config.ts";
-import { fingerprint as payloadFingerprint } from "./ids.ts";
+import {
+  fingerprint as payloadFingerprint,
+  payoutInstructionApprovalHash,
+} from "./ids.ts";
 
 export interface BankDetails {
   branch: string;
@@ -177,6 +180,14 @@ export class SqlStore implements Store {
     const tx = new sql.Transaction(this.pool);
     await tx.begin();
     const id = randomUUID();
+    const approvalHash = bank
+      ? payoutInstructionApprovalHash({
+          id,
+          amountMinor: input.amountMinor,
+          branch: bank.branch,
+          bankAccount: bank.account,
+        })
+      : null;
     try {
       await new sql.Request(tx)
         .input("id", sql.Char(36), id)
@@ -189,6 +200,7 @@ export class SqlStore implements Store {
         .input("branch", sql.Char(6), bank?.branch ?? null)
         .input("bankAccount", sql.Char(11), bank?.account ?? null)
         .input("holder", sql.VarChar(14), bank?.holder ?? null)
+        .input("approvalHash", sql.Char(64), approvalHash)
         .input("traceparent", sql.VarChar(128), traceparent ?? null).query(`
           SET XACT_ABORT ON;
           INSERT dbo.Allocations (Id,ClientId,IdempotencyKey,Fingerprint,SourceAccount,TargetAccount,AmountMinor,Currency,Status,Traceparent)
@@ -196,8 +208,8 @@ export class SqlStore implements Store {
           INSERT dbo.Outbox (AllocationId,Status,NextAttemptAtUtc,FencingToken,Traceparent) VALUES (@id,'PENDING',SYSUTCDATETIME(),0,@traceparent);
           INSERT dbo.AllocationEvents (AllocationId,Status,Traceparent) VALUES (@id,'QUEUED',@traceparent);
           IF @branch IS NOT NULL
-            INSERT dbo.PayoutInstructions (Id,ClientId,EmployeeAccount,AmountMinor,Branch,BankAccount,Holder)
-            VALUES (@id,@client,@source,@amount,@branch,@bankAccount,@holder);`);
+            INSERT dbo.PayoutInstructions (Id,ClientId,EmployeeAccount,AmountMinor,Branch,BankAccount,Holder,ApprovalHash)
+            VALUES (@id,@client,@source,@amount,@branch,@bankAccount,@holder,@approvalHash);`);
       await tx.commit();
       return (await this.get(id))!;
     } catch (error: any) {
