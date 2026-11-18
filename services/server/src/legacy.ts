@@ -31,13 +31,22 @@ export interface LegacyInventory {
   };
   truncated: boolean;
 }
+export interface LegacyCallOptions {
+  fencingToken?: number;
+}
 export interface Legacy {
-  lookup(id: string): Promise<LegacyResult | undefined>;
-  submit(allocation: Allocation): Promise<LegacyResult>;
-  inquire(id: string): Promise<unknown>;
-  retryUnposted(id: string): Promise<unknown>;
-  accounts(): Promise<AccountSnapshot>;
-  inventory(): Promise<LegacyInventory>;
+  lookup(
+    id: string,
+    opts?: LegacyCallOptions,
+  ): Promise<LegacyResult | undefined>;
+  submit(
+    allocation: Allocation,
+    opts?: LegacyCallOptions,
+  ): Promise<LegacyResult>;
+  inquire(id: string, opts?: LegacyCallOptions): Promise<unknown>;
+  retryUnposted(id: string, opts?: LegacyCallOptions): Promise<unknown>;
+  accounts(opts?: LegacyCallOptions): Promise<AccountSnapshot>;
+  inventory(opts?: LegacyCallOptions): Promise<LegacyInventory>;
 }
 export class LegacyClient implements Legacy {
   constructor(
@@ -50,13 +59,18 @@ export class LegacyClient implements Legacy {
     method = "GET",
     body?: unknown,
     ops = false,
+    opts?: LegacyCallOptions,
   ) {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${ops ? this.opsKey : this.bridgeKey}`,
+      "Content-Type": "application/json",
+    };
+    if (opts?.fencingToken !== undefined) {
+      headers["X-Fencing-Token"] = String(opts.fencingToken);
+    }
     const response = await fetch(this.base + path, {
       method,
-      headers: {
-        Authorization: `Bearer ${ops ? this.opsKey : this.bridgeKey}`,
-        "Content-Type": "application/json",
-      },
+      headers,
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(12000),
     });
@@ -64,28 +78,34 @@ export class LegacyClient implements Legacy {
     if (!response.ok) throw new Error(`LEGACY_HTTP_${response.status}`);
     return response.json();
   }
-  async lookup(id: string) {
-    return this.call(`/v1/requests/${id}`);
+  async lookup(id: string, opts?: LegacyCallOptions) {
+    return this.call(`/v1/requests/${id}`, "GET", undefined, false, opts);
   }
-  async submit(a: Allocation) {
-    const result = await this.call("/v1/requests", "POST", {
-      reference: a.id,
-      sourceAccount: a.sourceAccount,
-      targetAccount: a.targetAccount,
-      amountMinor: a.amountMinor,
-      currency: a.currency,
-    });
+  async submit(a: Allocation, opts?: LegacyCallOptions) {
+    const result = await this.call(
+      "/v1/requests",
+      "POST",
+      {
+        reference: a.id,
+        sourceAccount: a.sourceAccount,
+        targetAccount: a.targetAccount,
+        amountMinor: a.amountMinor,
+        currency: a.currency,
+      },
+      false,
+      opts,
+    );
     if (!result) throw new Error("LEGACY_SUBMIT_NOT_FOUND");
     return result;
   }
-  async inquire(id: string) {
-    return this.call(`/v1/requests/${id}/inquiry`, "POST", {}, true);
+  async inquire(id: string, opts?: LegacyCallOptions) {
+    return this.call(`/v1/requests/${id}/inquiry`, "POST", {}, true, opts);
   }
-  async retryUnposted(id: string) {
-    return this.call(`/v1/requests/${id}/retry`, "POST", {}, true);
+  async retryUnposted(id: string, opts?: LegacyCallOptions) {
+    return this.call(`/v1/requests/${id}/retry`, "POST", {}, true, opts);
   }
-  async accounts(): Promise<AccountSnapshot> {
-    const data = await this.call("/v1/accounts");
+  async accounts(opts?: LegacyCallOptions): Promise<AccountSnapshot> {
+    const data = await this.call("/v1/accounts", "GET", undefined, false, opts);
     if (
       !data ||
       typeof data.generation !== "string" ||
@@ -110,8 +130,14 @@ export class LegacyClient implements Legacy {
       throw new Error("LEGACY_INVALID_ACCOUNT_SNAPSHOT");
     return data;
   }
-  async inventory(): Promise<LegacyInventory> {
-    const data = await this.call("/v1/reconciliation");
+  async inventory(opts?: LegacyCallOptions): Promise<LegacyInventory> {
+    const data = await this.call(
+      "/v1/reconciliation",
+      "GET",
+      undefined,
+      false,
+      opts,
+    );
     const validRows = (rows: any) =>
       Array.isArray(rows) &&
       rows.length <= 5000 &&

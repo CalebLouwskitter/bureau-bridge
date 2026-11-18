@@ -8,6 +8,7 @@ use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
+use StaleFencingTokenException;
 
 final class LibTest extends TestCase
 {
@@ -254,5 +255,47 @@ final class LibTest extends TestCase
         $this->assertStringContainsString("'@malicious", $csv);
         $this->assertStringContainsString("'\tcmd", $csv);
         $this->assertStringContainsString('"safe,value"', $csv);
+    }
+
+    public function testParseFencingTokenAcceptsValidPositiveIntegersAndNull(): void
+    {
+        $this->assertNull(parse_fencing_token(null));
+        $this->assertNull(parse_fencing_token(''));
+        $this->assertNull(parse_fencing_token('   '));
+        $this->assertSame(1, parse_fencing_token('1'));
+        $this->assertSame(42, parse_fencing_token(' 42 '));
+        $this->assertSame(9999999999, parse_fencing_token('9999999999'));
+    }
+
+    #[DataProvider('invalidFencingTokenProvider')]
+    public function testParseFencingTokenRejectsInvalidValues(string $raw): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        parse_fencing_token($raw);
+    }
+
+    /**
+     * @return list<array{string}>
+     */
+    public static function invalidFencingTokenProvider(): array
+    {
+        return [
+            ['0'],
+            ['-1'],
+            ['abc'],
+            ['1.5'],
+            ['01'],
+            ['12345678901234567890'],
+        ];
+    }
+
+    public function testAssertFencingTokenRejectsLowerTokenAndAllowsEqualOrHigher(): void
+    {
+        assert_fencing_token(null, 5);
+        assert_fencing_token(5, 5);
+        assert_fencing_token(6, 5);
+
+        $this->expectException(StaleFencingTokenException::class);
+        assert_fencing_token(4, 5);
     }
 }

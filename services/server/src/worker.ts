@@ -19,8 +19,10 @@ export async function tick(store: Store, legacy: Legacy): Promise<boolean> {
       return true;
     }
     // Always inspect the stable reference before submitting. A retry preserves it.
+    const callOpts = { fencingToken: job.fencingToken };
     const result =
-      (await legacy.lookup(job.id)) ?? (await legacy.submit(allocation));
+      (await legacy.lookup(job.id, callOpts)) ??
+      (await legacy.submit(allocation, callOpts));
     if (
       result.reference !== allocation.id ||
       result.sourceAccount !== allocation.sourceAccount ||

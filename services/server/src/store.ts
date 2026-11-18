@@ -21,6 +21,7 @@ export class Conflict extends Error {}
 export interface Job {
   id: string;
   token: string;
+  fencingToken: number;
   failures: number;
 }
 export interface Outcome {
@@ -37,9 +38,10 @@ export interface Store {
   list(clientId: string, employee?: string): Promise<Allocation[]>;
   get(id: string): Promise<Allocation | undefined>;
   events(id: string): Promise<unknown[]>;
-  claim(): Promise<Job | undefined>;
+  claim(leaseSeconds?: number): Promise<Job | undefined>;
   finish(job: Job, outcome: Outcome): Promise<void>;
   retry(job: Job, reason: string): Promise<void>;
+  deadLetter?(job: Job, reason: string): Promise<void>;
   wake(id: string): Promise<void>;
   accounts(clientId: string, employee?: string): Promise<AccountProjection[]>;
   syncAccounts(clientId: string, snapshot: AccountSnapshot): Promise<void>;
@@ -114,7 +116,7 @@ export class SqlStore implements Store {
           SET XACT_ABORT ON;
           INSERT dbo.Allocations (Id,ClientId,IdempotencyKey,Fingerprint,SourceAccount,TargetAccount,AmountMinor,Currency,Status)
           VALUES (@id,@client,@key,@hash,@source,@target,@amount,'ZAR','QUEUED');
-          INSERT dbo.Outbox (AllocationId) VALUES (@id);
+          INSERT dbo.Outbox (AllocationId,Status,NextAttemptAtUtc,FencingToken) VALUES (@id,'PENDING',SYSUTCDATETIME(),0);
           INSERT dbo.AllocationEvents (AllocationId,Status) VALUES (@id,'QUEUED');
           IF @branch IS NOT NULL
             INSERT dbo.PayoutInstructions (Id,ClientId,EmployeeAccount,AmountMinor,Branch,BankAccount,Holder)
@@ -163,17 +165,34 @@ export class SqlStore implements Store {
         )
     ).recordset;
   }
-  async claim(): Promise<Job | undefined> {
-    const token = randomUUID();
-    const result = await this.pool.request().input("token", sql.Char(36), token)
-      .query(`
-      ;WITH due AS (SELECT TOP (1) * FROM dbo.Outbox WITH (UPDLOCK,READPAST,ROWLOCK)
-        WHERE DueAt<=SYSUTCDATETIME() AND (LeaseUntil IS NULL OR LeaseUntil<SYSUTCDATETIME()) ORDER BY DueAt)
-      UPDATE due SET LeaseUntil=DATEADD(SECOND,60,SYSUTCDATETIME()),LeaseToken=@token
-      OUTPUT inserted.AllocationId,inserted.Failures;`);
+  async claim(leaseSeconds = 60): Promise<Job | undefined> {
+    const leaseToken = randomUUID();
+    const result = await this.pool
+      .request()
+      .input("leaseToken", sql.Char(36), leaseToken)
+      .input("leaseSeconds", sql.Int, leaseSeconds).query(`
+      ;WITH due AS (
+        SELECT TOP (1) *
+        FROM dbo.Outbox WITH (UPDLOCK, READPAST, ROWLOCK)
+        WHERE (Status = 'PENDING' AND NextAttemptAtUtc <= SYSUTCDATETIME())
+           OR (Status = 'CLAIMED' AND LockedUntilUtc < SYSUTCDATETIME())
+        ORDER BY NextAttemptAtUtc ASC, AllocationId ASC
+      )
+      UPDATE due
+      SET Status = 'CLAIMED',
+          LockedUntilUtc = DATEADD(SECOND, @leaseSeconds, SYSUTCDATETIME()),
+          LeaseUntil = DATEADD(SECOND, @leaseSeconds, SYSUTCDATETIME()),
+          LeaseToken = @leaseToken,
+          FencingToken = FencingToken + 1
+      OUTPUT inserted.AllocationId, inserted.FencingToken, inserted.LeaseToken, inserted.Failures;`);
     const row = result.recordset[0];
     return row
-      ? { id: row.AllocationId, token, failures: row.Failures }
+      ? {
+          id: row.AllocationId,
+          token: row.LeaseToken,
+          fencingToken: Number(row.FencingToken),
+          failures: row.Failures,
+        }
       : undefined;
   }
   async finish(job: Job, outcome: Outcome) {
@@ -183,22 +202,29 @@ export class SqlStore implements Store {
     await this.pool
       .request()
       .input("id", sql.Char(36), job.id)
-      .input("token", sql.Char(36), job.token)
+      .input("fencingToken", sql.BigInt, job.fencingToken)
       .input("status", sql.VarChar(24), outcome.status)
       .input("reason", sql.VarChar(80), outcome.reason)
       .input("posting", sql.Char(36), outcome.postingId)
       .input("terminal", sql.Bit, terminal).query(`
         SET XACT_ABORT ON; BEGIN TRAN;
-        UPDATE dbo.Outbox SET LeaseUntil=NULL,LeaseToken=NULL,Failures=0,LastError=NULL,
-          DueAt=CASE WHEN @terminal=1 THEN NULL ELSE DATEADD(SECOND,3,SYSUTCDATETIME()) END
-          WHERE AllocationId=@id AND LeaseToken=@token;
-        IF @@ROWCOUNT=1 BEGIN
-          IF EXISTS(SELECT 1 FROM dbo.Allocations WHERE Id=@id AND Status IN ('POSTED','DECLINED'))
-            UPDATE dbo.Outbox SET DueAt=NULL WHERE AllocationId=@id;
-          INSERT dbo.AllocationEvents (AllocationId,Status,Reason)
-            SELECT Id,@status,@reason FROM dbo.Allocations WHERE Id=@id AND Status<>@status AND Status NOT IN ('POSTED','DECLINED');
-          UPDATE dbo.Allocations SET Status=@status,Reason=@reason,PostingId=@posting,UpdatedAt=SYSUTCDATETIME()
-            WHERE Id=@id AND Status NOT IN ('POSTED','DECLINED');
+        UPDATE dbo.Outbox
+          SET Status = CASE WHEN @terminal = 1 THEN (CASE WHEN @status = 'NEEDS_REVIEW' THEN 'DEAD_LETTER' ELSE 'COMPLETED' END) ELSE 'PENDING' END,
+              LockedUntilUtc = NULL,
+              LeaseUntil = NULL,
+              LeaseToken = NULL,
+              Failures = 0,
+              LastError = NULL,
+              NextAttemptAtUtc = CASE WHEN @terminal = 1 THEN NULL ELSE DATEADD(SECOND, 3, SYSUTCDATETIME()) END,
+              DueAt = CASE WHEN @terminal = 1 THEN NULL ELSE DATEADD(SECOND, 3, SYSUTCDATETIME()) END
+          WHERE AllocationId = @id AND FencingToken = @fencingToken AND Status = 'CLAIMED';
+        IF @@ROWCOUNT = 1 BEGIN
+          IF EXISTS(SELECT 1 FROM dbo.Allocations WHERE Id = @id AND Status IN ('POSTED', 'DECLINED'))
+            UPDATE dbo.Outbox SET Status = 'COMPLETED', NextAttemptAtUtc = NULL, DueAt = NULL WHERE AllocationId = @id;
+          INSERT dbo.AllocationEvents (AllocationId, Status, Reason)
+            SELECT Id, @status, @reason FROM dbo.Allocations WHERE Id = @id AND Status <> @status AND Status NOT IN ('POSTED', 'DECLINED');
+          UPDATE dbo.Allocations SET Status = @status, Reason = @reason, PostingId = @posting, UpdatedAt = SYSUTCDATETIME()
+            WHERE Id = @id AND Status NOT IN ('POSTED', 'DECLINED');
         END; COMMIT;`);
   }
   async retry(job: Job, reason: string) {
@@ -207,30 +233,70 @@ export class SqlStore implements Store {
     await this.pool
       .request()
       .input("id", sql.Char(36), job.id)
-      .input("token", sql.Char(36), job.token)
+      .input("fencingToken", sql.BigInt, job.fencingToken)
       .input("failures", sql.Int, failures)
       .input("delay", sql.Int, Math.min(60, 2 ** failures))
       .input("status", sql.VarChar(24), status)
       .input("reason", sql.VarChar(80), reason.slice(0, 80)).query(`
         SET XACT_ABORT ON; BEGIN TRAN;
-        UPDATE dbo.Outbox SET Failures=@failures,LastError=@reason,LeaseUntil=NULL,LeaseToken=NULL,
-          DueAt=CASE WHEN @failures>=6 THEN NULL ELSE DATEADD(SECOND,@delay,SYSUTCDATETIME()) END
-          WHERE AllocationId=@id AND LeaseToken=@token;
-        IF @@ROWCOUNT=1 BEGIN
-          IF EXISTS(SELECT 1 FROM dbo.Allocations WHERE Id=@id AND Status IN ('POSTED','DECLINED'))
-            UPDATE dbo.Outbox SET DueAt=NULL WHERE AllocationId=@id;
-          INSERT dbo.AllocationEvents (AllocationId,Status,Reason)
-            SELECT Id,@status,@reason FROM dbo.Allocations WHERE Id=@id AND Status<>@status AND Status NOT IN ('POSTED','DECLINED');
-          UPDATE dbo.Allocations SET Status=@status,Reason=@reason,UpdatedAt=SYSUTCDATETIME()
-            WHERE Id=@id AND Status NOT IN ('POSTED','DECLINED');
+        UPDATE dbo.Outbox
+          SET Failures = @failures,
+              LastError = @reason,
+              Status = CASE WHEN @failures >= 6 THEN 'DEAD_LETTER' ELSE 'PENDING' END,
+              LockedUntilUtc = NULL,
+              LeaseUntil = NULL,
+              LeaseToken = NULL,
+              NextAttemptAtUtc = CASE WHEN @failures >= 6 THEN NULL ELSE DATEADD(SECOND, @delay, SYSUTCDATETIME()) END,
+              DueAt = CASE WHEN @failures >= 6 THEN NULL ELSE DATEADD(SECOND, @delay, SYSUTCDATETIME()) END
+          WHERE AllocationId = @id AND FencingToken = @fencingToken AND Status = 'CLAIMED';
+        IF @@ROWCOUNT = 1 BEGIN
+          IF EXISTS(SELECT 1 FROM dbo.Allocations WHERE Id = @id AND Status IN ('POSTED', 'DECLINED'))
+            UPDATE dbo.Outbox SET Status = 'COMPLETED', NextAttemptAtUtc = NULL, DueAt = NULL WHERE AllocationId = @id;
+          INSERT dbo.AllocationEvents (AllocationId, Status, Reason)
+            SELECT Id, @status, @reason FROM dbo.Allocations WHERE Id = @id AND Status <> @status AND Status NOT IN ('POSTED', 'DECLINED');
+          UPDATE dbo.Allocations SET Status = @status, Reason = @reason, UpdatedAt = SYSUTCDATETIME()
+            WHERE Id = @id AND Status NOT IN ('POSTED', 'DECLINED');
+        END; COMMIT;`);
+  }
+  async deadLetter(job: Job, reason: string) {
+    await this.pool
+      .request()
+      .input("id", sql.Char(36), job.id)
+      .input("fencingToken", sql.BigInt, job.fencingToken)
+      .input("reason", sql.VarChar(80), reason.slice(0, 80)).query(`
+        SET XACT_ABORT ON; BEGIN TRAN;
+        UPDATE dbo.Outbox
+          SET LastError = @reason,
+              Status = 'DEAD_LETTER',
+              LockedUntilUtc = NULL,
+              LeaseUntil = NULL,
+              LeaseToken = NULL,
+              NextAttemptAtUtc = NULL,
+              DueAt = NULL
+          WHERE AllocationId = @id AND FencingToken = @fencingToken AND Status = 'CLAIMED';
+        IF @@ROWCOUNT = 1 BEGIN
+          IF EXISTS(SELECT 1 FROM dbo.Allocations WHERE Id = @id AND Status IN ('POSTED', 'DECLINED'))
+            UPDATE dbo.Outbox SET Status = 'COMPLETED' WHERE AllocationId = @id;
+          INSERT dbo.AllocationEvents (AllocationId, Status, Reason)
+            SELECT Id, 'NEEDS_REVIEW', @reason FROM dbo.Allocations WHERE Id = @id AND Status <> 'NEEDS_REVIEW' AND Status NOT IN ('POSTED', 'DECLINED');
+          UPDATE dbo.Allocations SET Status = 'NEEDS_REVIEW', Reason = @reason, UpdatedAt = SYSUTCDATETIME()
+            WHERE Id = @id AND Status NOT IN ('POSTED', 'DECLINED');
         END; COMMIT;`);
   }
   async wake(id: string) {
     await this.pool.request().input("id", sql.Char(36), id)
-      .query(`UPDATE o SET DueAt=SYSUTCDATETIME(),Failures=0 FROM dbo.Outbox o
-        JOIN dbo.Allocations a ON a.Id=o.AllocationId
-        WHERE o.AllocationId=@id AND a.Status NOT IN ('POSTED','DECLINED')
-        AND (o.LeaseUntil IS NULL OR o.LeaseUntil<SYSUTCDATETIME());`);
+      .query(`UPDATE o
+        SET Status = 'PENDING',
+            NextAttemptAtUtc = SYSUTCDATETIME(),
+            DueAt = SYSUTCDATETIME(),
+            LockedUntilUtc = NULL,
+            LeaseUntil = NULL,
+            LeaseToken = NULL,
+            Failures = 0
+        FROM dbo.Outbox o
+        JOIN dbo.Allocations a ON a.Id = o.AllocationId
+        WHERE o.AllocationId = @id AND a.Status NOT IN ('POSTED', 'DECLINED')
+        AND (o.LockedUntilUtc IS NULL OR o.LockedUntilUtc < SYSUTCDATETIME());`);
   }
   async accounts(
     clientId: string,
@@ -366,5 +432,307 @@ export class SqlStore implements Store {
       truncated: Boolean(r.Truncated),
       findings: findings.recordset,
     };
+  }
+}
+
+export type OutboxState = "PENDING" | "CLAIMED" | "COMPLETED" | "DEAD_LETTER";
+
+export interface MemoryOutboxRow {
+  allocationId: string;
+  status: OutboxState;
+  nextAttemptAtUtc: number | null;
+  lockedUntilUtc: number | null;
+  leaseToken: string | null;
+  fencingToken: number;
+  failures: number;
+  lastError: string | null;
+}
+
+export class MemoryStore implements Store {
+  readonly allocations = new Map<string, Allocation>();
+  readonly byKey = new Map<string, { id: string; fingerprint: string }>();
+  readonly outbox = new Map<string, MemoryOutboxRow>();
+  readonly eventLog = new Map<
+    string,
+    Array<{ status: Status; reason: string | null; createdAt: string }>
+  >();
+  readonly accountSnapshots = new Map<string, AccountProjection[]>();
+  readonly reconciliations = new Map<string, ReconciliationRun[]>();
+
+  constructor(private readonly now: () => number = () => Date.now()) {}
+
+  async create(
+    clientId: string,
+    key: string,
+    input: AllocationInput,
+  ): Promise<Allocation> {
+    const fp = payloadFingerprint(input);
+    const composite = `${clientId}:${key}`;
+    const existing = this.byKey.get(composite);
+    if (existing) {
+      if (existing.fingerprint !== fp)
+        throw new Conflict("Idempotency key reused with different data");
+      return { ...this.allocations.get(existing.id)! };
+    }
+    const id = randomUUID();
+    const ts = new Date(this.now()).toISOString();
+    const allocation: Allocation = {
+      id,
+      clientId,
+      ...input,
+      status: "QUEUED",
+      reason: null,
+      postingId: null,
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    this.allocations.set(id, allocation);
+    this.byKey.set(composite, { id, fingerprint: fp });
+    this.outbox.set(id, {
+      allocationId: id,
+      status: "PENDING",
+      nextAttemptAtUtc: this.now(),
+      lockedUntilUtc: null,
+      leaseToken: null,
+      fencingToken: 0,
+      failures: 0,
+      lastError: null,
+    });
+    this.eventLog.set(id, [{ status: "QUEUED", reason: null, createdAt: ts }]);
+    return { ...allocation };
+  }
+
+  async list(clientId: string, employee?: string): Promise<Allocation[]> {
+    return Array.from(this.allocations.values())
+      .filter(
+        (a) =>
+          a.clientId === clientId &&
+          (!employee ||
+            a.targetAccount === employee ||
+            a.sourceAccount === employee),
+      )
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+      .map((a) => ({ ...a }));
+  }
+
+  async get(id: string): Promise<Allocation | undefined> {
+    const a = this.allocations.get(id);
+    return a ? { ...a } : undefined;
+  }
+
+  async events(id: string): Promise<unknown[]> {
+    return [...(this.eventLog.get(id) ?? [])];
+  }
+
+  async claim(leaseSeconds = 60): Promise<Job | undefined> {
+    const current = this.now();
+    const candidates = Array.from(this.outbox.values())
+      .filter(
+        (row) =>
+          (row.status === "PENDING" &&
+            row.nextAttemptAtUtc !== null &&
+            row.nextAttemptAtUtc <= current) ||
+          (row.status === "CLAIMED" &&
+            row.lockedUntilUtc !== null &&
+            row.lockedUntilUtc < current),
+      )
+      .sort((a, b) => {
+        const at = a.nextAttemptAtUtc ?? 0;
+        const bt = b.nextAttemptAtUtc ?? 0;
+        if (at !== bt) return at - bt;
+        return a.allocationId < b.allocationId ? -1 : 1;
+      });
+    const row = candidates[0];
+    if (!row) return undefined;
+    const leaseToken = randomUUID();
+    row.status = "CLAIMED";
+    row.lockedUntilUtc = current + leaseSeconds * 1000;
+    row.leaseToken = leaseToken;
+    row.fencingToken += 1;
+    return {
+      id: row.allocationId,
+      token: leaseToken,
+      fencingToken: row.fencingToken,
+      failures: row.failures,
+    };
+  }
+
+  async finish(job: Job, outcome: Outcome): Promise<void> {
+    const row = this.outbox.get(job.id);
+    if (
+      !row ||
+      row.status !== "CLAIMED" ||
+      row.fencingToken !== job.fencingToken
+    )
+      return;
+    const terminal = ["POSTED", "DECLINED", "NEEDS_REVIEW"].includes(
+      outcome.status,
+    );
+    row.status = terminal
+      ? outcome.status === "NEEDS_REVIEW"
+        ? "DEAD_LETTER"
+        : "COMPLETED"
+      : "PENDING";
+    row.lockedUntilUtc = null;
+    row.leaseToken = null;
+    row.failures = 0;
+    row.lastError = null;
+    row.nextAttemptAtUtc = terminal ? null : this.now() + 3_000;
+
+    const a = this.allocations.get(job.id);
+    if (!a) return;
+    if (["POSTED", "DECLINED"].includes(a.status)) {
+      row.status = "COMPLETED";
+      row.nextAttemptAtUtc = null;
+      return;
+    }
+    if (a.status !== outcome.status) {
+      this.eventLog.get(job.id)?.push({
+        status: outcome.status,
+        reason: outcome.reason,
+        createdAt: new Date(this.now()).toISOString(),
+      });
+    }
+    a.status = outcome.status;
+    a.reason = outcome.reason;
+    a.postingId = outcome.postingId;
+    a.updatedAt = new Date(this.now()).toISOString();
+  }
+
+  async retry(job: Job, reason: string): Promise<void> {
+    const row = this.outbox.get(job.id);
+    if (
+      !row ||
+      row.status !== "CLAIMED" ||
+      row.fencingToken !== job.fencingToken
+    )
+      return;
+    const failures = job.failures + 1;
+    const status: Status = failures >= 6 ? "NEEDS_REVIEW" : "VERIFYING";
+    const delaySec = Math.min(60, 2 ** failures);
+    row.failures = failures;
+    row.lastError = reason.slice(0, 80);
+    row.status = failures >= 6 ? "DEAD_LETTER" : "PENDING";
+    row.lockedUntilUtc = null;
+    row.leaseToken = null;
+    row.nextAttemptAtUtc = failures >= 6 ? null : this.now() + delaySec * 1000;
+
+    const a = this.allocations.get(job.id);
+    if (!a) return;
+    if (["POSTED", "DECLINED"].includes(a.status)) {
+      row.status = "COMPLETED";
+      row.nextAttemptAtUtc = null;
+      return;
+    }
+    if (a.status !== status) {
+      this.eventLog.get(job.id)?.push({
+        status,
+        reason: row.lastError,
+        createdAt: new Date(this.now()).toISOString(),
+      });
+    }
+    a.status = status;
+    a.reason = row.lastError;
+    a.updatedAt = new Date(this.now()).toISOString();
+  }
+
+  async deadLetter(job: Job, reason: string): Promise<void> {
+    const row = this.outbox.get(job.id);
+    if (
+      !row ||
+      row.status !== "CLAIMED" ||
+      row.fencingToken !== job.fencingToken
+    )
+      return;
+    row.lastError = reason.slice(0, 80);
+    row.status = "DEAD_LETTER";
+    row.lockedUntilUtc = null;
+    row.leaseToken = null;
+    row.nextAttemptAtUtc = null;
+
+    const a = this.allocations.get(job.id);
+    if (!a) return;
+    if (["POSTED", "DECLINED"].includes(a.status)) {
+      row.status = "COMPLETED";
+      return;
+    }
+    if (a.status !== "NEEDS_REVIEW") {
+      this.eventLog.get(job.id)?.push({
+        status: "NEEDS_REVIEW",
+        reason: row.lastError,
+        createdAt: new Date(this.now()).toISOString(),
+      });
+    }
+    a.status = "NEEDS_REVIEW";
+    a.reason = row.lastError;
+    a.updatedAt = new Date(this.now()).toISOString();
+  }
+
+  async wake(id: string): Promise<void> {
+    const a = this.allocations.get(id);
+    const row = this.outbox.get(id);
+    if (!a || !row || ["POSTED", "DECLINED"].includes(a.status)) return;
+    if (row.lockedUntilUtc !== null && row.lockedUntilUtc >= this.now()) return;
+    row.status = "PENDING";
+    row.nextAttemptAtUtc = this.now();
+    row.lockedUntilUtc = null;
+    row.leaseToken = null;
+    row.failures = 0;
+  }
+
+  async accounts(
+    clientId: string,
+    employee?: string,
+  ): Promise<AccountProjection[]> {
+    const rows = this.accountSnapshots.get(clientId) ?? [];
+    return employee ? rows.filter((r) => r.account === employee) : [...rows];
+  }
+
+  async syncAccounts(
+    clientId: string,
+    snapshot: AccountSnapshot,
+  ): Promise<void> {
+    const existing = this.accountSnapshots.get(clientId)?.[0];
+    if (
+      existing &&
+      (existing.sequence > snapshot.sequence ||
+        Date.parse(existing.observedAt) > Date.parse(snapshot.observedAt) ||
+        existing.generation === snapshot.generation)
+    )
+      return;
+    this.accountSnapshots.set(
+      clientId,
+      snapshot.balances.map((b) => ({
+        ...b,
+        generation: snapshot.generation,
+        sequence: snapshot.sequence,
+        observedAt: snapshot.observedAt,
+      })),
+    );
+  }
+
+  async scan(
+    clientId: string,
+  ): Promise<{ allocations: Allocation[]; truncated: boolean }> {
+    const all = Array.from(this.allocations.values())
+      .filter((a) => a.clientId === clientId)
+      .sort((a, b) => (a.id < b.id ? -1 : 1));
+    return {
+      allocations: all.slice(0, 5000).map((a) => ({ ...a })),
+      truncated: all.length > 5000,
+    };
+  }
+
+  async saveReconciliation(run: ReconciliationRun): Promise<void> {
+    const list = this.reconciliations.get(run.clientId) ?? [];
+    list.push(run);
+    this.reconciliations.set(run.clientId, list);
+  }
+
+  async latestReconciliation(
+    clientId: string,
+  ): Promise<ReconciliationRun | undefined> {
+    const list = this.reconciliations.get(clientId);
+    return list && list.length ? list[list.length - 1] : undefined;
   }
 }

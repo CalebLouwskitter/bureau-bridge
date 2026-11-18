@@ -46,7 +46,7 @@ function fixture() {
     list: async () => [allocation],
     get: async () => allocation,
     events: async () => [],
-    claim: async () => ({ id, token: "lease", failures: 0 }),
+    claim: async () => ({ id, token: "lease", fencingToken: 1, failures: 0 }),
     finish: async (_job, outcome) => {
       outcomes.push(outcome);
     },

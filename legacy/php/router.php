@@ -29,7 +29,9 @@ try {
             if (strlen($raw)>8192) respond(['error'=>'Body too large'],413);
             $data = json_decode($raw,true,32,JSON_THROW_ON_ERROR);
             if (!is_array($data)) respond(['error'=>'Expected object'],400);
-            respond(intake($data),202);
+            $rawToken = $_SERVER['HTTP_X_FENCING_TOKEN'] ?? null;
+            $fencingToken = parse_fencing_token(is_string($rawToken) ? $rawToken : null);
+            respond(intake($data, $fencingToken),202);
         }
         if (preg_match('#^/v1/requests/([0-9a-f-]{36})$#D',$path,$matches) && $method==='GET') {
             $row=lookup($matches[1]);
@@ -81,6 +83,7 @@ try {
     }
     require __DIR__.'/portal.php';
 } catch (InvalidArgumentException|JsonException $e) { respond(['error'=>$e->getMessage()],400); }
+catch (StaleFencingTokenException $e) { respond(['error'=>$e->getMessage(),'code'=>'STALE_FENCING_TOKEN'],409); }
 catch (DomainException $e) { respond(['error'=>$e->getMessage()],409); }
 catch (OutOfBoundsException $e) { respond(['error'=>$e->getMessage()],404); }
 catch (Throwable $e) { error_log($e->getMessage()); respond(['error'=>'Legacy operation needs investigation'],503); }

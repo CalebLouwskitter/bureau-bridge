@@ -384,7 +384,7 @@ export class SqlPayoutStore extends SqlStore implements PayoutStore {
           .input("code", sql.Char(2), result.code)
           .query(`INSERT dbo.Allocations (Id,ClientId,IdempotencyKey,Fingerprint,SourceAccount,TargetAccount,AmountMinor,Currency,Status)
               VALUES (@returnId,@client,@returnKey,@hash,'${SETTLEMENT_ACCOUNT}',@target,@amount,'ZAR','QUEUED');
-            INSERT dbo.Outbox (AllocationId) VALUES (@returnId);
+            INSERT dbo.Outbox (AllocationId,Status,NextAttemptAtUtc,FencingToken) VALUES (@returnId,'PENDING',SYSUTCDATETIME(),0);
             INSERT dbo.AllocationEvents (AllocationId,Status,Reason) VALUES (@returnId,'QUEUED','BANK_RETURN_' + @code);
             UPDATE dbo.PayoutInstructions SET BankOutcome='RETURNED',ReturnCode=@code,ReturnAllocationId=@returnId WHERE Id=@id;`);
       }

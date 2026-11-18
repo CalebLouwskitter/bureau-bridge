@@ -48,14 +48,16 @@ try {
     "Run against a fresh database with worker stopped",
   );
   const first = jobs.find(Boolean)!;
+  assert.equal(first.fencingToken, 1);
   await pool
     .request()
     .input("id", sql.Char(36), id)
     .query(
-      "UPDATE dbo.Outbox SET LeaseUntil=DATEADD(SECOND,-1,SYSUTCDATETIME()) WHERE AllocationId=@id",
+      "UPDATE dbo.Outbox SET LockedUntilUtc=DATEADD(SECOND,-1,SYSUTCDATETIME()), LeaseUntil=DATEADD(SECOND,-1,SYSUTCDATETIME()) WHERE AllocationId=@id",
     );
   const second = (await store.claim())!;
   assert.notEqual(first.token, second.token);
+  assert.equal(second.fencingToken, 2);
   await store.finish(first, {
     status: "POSTED",
     reason: "STALE",
@@ -70,6 +72,7 @@ try {
   assert.equal((await store.get(id))!.status, "AWAITING_BATCH");
   await store.wake(id);
   const finalJob = (await store.claim())!;
+  assert.equal(finalJob.fencingToken, 3);
   await store.finish(finalJob, {
     status: "POSTED",
     reason: "OK",
@@ -88,9 +91,12 @@ try {
     .input("id", sql.Char(36), id)
     .input("token", sql.Char(36), staleToken)
     .query(
-      "UPDATE dbo.Outbox SET LeaseToken=@token,LeaseUntil=DATEADD(SECOND,60,SYSUTCDATETIME()),DueAt=SYSUTCDATETIME() WHERE AllocationId=@id",
+      "UPDATE dbo.Outbox SET Status='CLAIMED', LeaseToken=@token, LockedUntilUtc=DATEADD(SECOND,60,SYSUTCDATETIME()), LeaseUntil=DATEADD(SECOND,60,SYSUTCDATETIME()), NextAttemptAtUtc=SYSUTCDATETIME(), DueAt=SYSUTCDATETIME() WHERE AllocationId=@id",
     );
-  await store.retry({ id, token: staleToken, failures: 0 }, "LEGACY_OFFLINE");
+  await store.retry(
+    { id, token: staleToken, fencingToken: finalJob.fencingToken, failures: 0 },
+    "LEGACY_OFFLINE",
+  );
   assert.equal((await store.get(id))!.status, "POSTED");
   assert.equal((await store.get(id))!.postingId, id);
   const observedAt = new Date().toISOString();
@@ -194,7 +200,7 @@ try {
   );
   await pool.request().input("client", sql.VarChar(30), client)
     .query(`UPDATE dbo.Allocations SET Status='POSTED',PostingId=Id WHERE ClientId=@client AND TargetAccount='${SETTLEMENT_ACCOUNT}';
-      UPDATE o SET DueAt=NULL FROM dbo.Outbox o JOIN dbo.Allocations a ON a.Id=o.AllocationId WHERE a.ClientId=@client;`);
+      UPDATE o SET Status='COMPLETED',NextAttemptAtUtc=NULL,DueAt=NULL FROM dbo.Outbox o JOIN dbo.Allocations a ON a.Id=o.AllocationId WHERE a.ClientId=@client;`);
   const fileKey = randomUUID();
   const generated = await Promise.all([
     generateFile(store, client, fileKey),

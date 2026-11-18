@@ -49,20 +49,63 @@ function allocation(array $data): array {
     return ['reference'=>$ref, 'sourceAccount'=>$data['sourceAccount'],
         'targetAccount'=>$data['targetAccount'], 'amountMinor'=>$amount, 'currency'=>'ZAR'];
 }
+class StaleFencingTokenException extends DomainException {}
+
+function parse_fencing_token(?string $raw): ?int {
+    if ($raw === null) return null;
+    $trimmed = trim($raw);
+    if ($trimmed === '') return null;
+    if (!preg_match('/^[1-9]\d{0,18}$/D', $trimmed)) {
+        throw new InvalidArgumentException('X-Fencing-Token must be a positive integer');
+    }
+    return (int)$trimmed;
+}
+
+function assert_fencing_token(?int $incoming, int $recorded): void {
+    if ($incoming !== null && $incoming < $recorded) {
+        throw new StaleFencingTokenException(
+            sprintf('Stale fencing token %d; recorded token is %d', $incoming, $recorded)
+        );
+    }
+}
+
 /**
  * @param array<string, mixed> $data
  * @return array<string, mixed>
  */
-function intake(array $data): array {
+function intake(array $data, ?int $fencingToken = null): array {
     $row = allocation($data);
     $hash = hash('sha256', json_encode($row, JSON_THROW_ON_ERROR));
+    $initialToken = $fencingToken ?? 0;
     try {
-        $stmt = db()->prepare('INSERT INTO requests (reference,source_account,target_account,amount_minor,currency,fingerprint) VALUES (?,?,?,?,?,?)');
-        $stmt->execute([$row['reference'],$row['sourceAccount'],$row['targetAccount'],$row['amountMinor'],$row['currency'],$hash]);
+        $stmt = db()->prepare(
+            'INSERT INTO requests (reference,source_account,target_account,amount_minor,currency,fingerprint,fencing_token) VALUES (?,?,?,?,?,?,?)'
+        );
+        $stmt->execute([
+            $row['reference'],$row['sourceAccount'],$row['targetAccount'],
+            $row['amountMinor'],$row['currency'],$hash,$initialToken
+        ]);
     } catch (PDOException $e) {
         if (($e->errorInfo[1] ?? 0) !== 1062) throw $e;
-        $existing = lookup($row['reference']);
-        if (!$existing || !hash_equals($existing['fingerprint'], $hash)) throw new DomainException('Reference already belongs to different request data');
+        db()->beginTransaction();
+        try {
+            $stmt = db()->prepare('SELECT * FROM requests WHERE reference=? FOR UPDATE');
+            $stmt->execute([$row['reference']]);
+            $existing = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (!is_array($existing) || !hash_equals((string)$existing['fingerprint'], $hash)) {
+                throw new DomainException('Reference already belongs to different request data');
+            }
+            $recordedToken = (int)($existing['fencing_token'] ?? 0);
+            assert_fencing_token($fencingToken, $recordedToken);
+            if ($fencingToken !== null && $fencingToken > $recordedToken) {
+                $upd = db()->prepare('UPDATE requests SET fencing_token=? WHERE reference=? AND fencing_token < ?');
+                $upd->execute([$fencingToken, $row['reference'], $fencingToken]);
+            }
+            db()->commit();
+        } catch (Throwable $inner) {
+            if (db()->inTransaction()) db()->rollBack();
+            throw $inner;
+        }
     }
     $created = lookup($row['reference']);
     if (!$created) throw new RuntimeException('Failed to retrieve created request');
@@ -86,6 +129,7 @@ function public_row(array $row): array {
         'targetAccount'=>$row['target_account'],'amountMinor'=>(int)$row['amount_minor'],
         'currency'=>$row['currency'],'status'=>$row['status'],'reason'=>$row['reason'],
         'postingId'=>$row['posting_id'],'batchId'=>$row['batch_id'],
+        'fencingToken'=>isset($row['fencing_token']) ? (int)$row['fencing_token'] : 0,
         'createdAt'=>str_replace(' ','T',$row['created_at']).'Z',
         'updatedAt'=>str_replace(' ','T',$row['updated_at']).'Z'];
 }
