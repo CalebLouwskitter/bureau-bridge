@@ -310,4 +310,18 @@ final class LibTest extends TestCase
         $this->expectException(DomainException::class);
         assert_valid_legacy_transition('POSTED', 'VERIFYING');
     }
+
+    public function testW3cTraceparentParsingAndGeneration(): void
+    {
+        $valid = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01';
+        $this->assertSame($valid, parse_traceparent($valid));
+        $this->assertSame('4bf92f3577b34da6a3ce929d0e0e4736', trace_id_from_traceparent($valid));
+        $this->assertNull(parse_traceparent('ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'));
+        $this->assertNull(parse_traceparent('00-' . str_repeat('0', 32) . '-00f067aa0ba902b7-01'));
+        $this->assertNull(parse_traceparent('00-4bf92f3577b34da6a3ce929d0e0e4736-' . str_repeat('0', 16) . '-01'));
+
+        $generated = ensure_traceparent('invalid');
+        $this->assertNotNull(parse_traceparent($generated));
+        $this->assertSame(32, strlen((string)trace_id_from_traceparent($generated)));
+    }
 }

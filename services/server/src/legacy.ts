@@ -42,6 +42,7 @@ export interface LegacyInventory {
 }
 export interface LegacyCallOptions {
   fencingToken?: number;
+  traceparent?: string | null;
 }
 export interface Legacy {
   lookup(
@@ -122,6 +123,9 @@ export class LegacyClient implements Legacy {
     };
     if (opts?.fencingToken !== undefined) {
       headers["X-Fencing-Token"] = String(opts.fencingToken);
+    }
+    if (opts?.traceparent) {
+      headers["traceparent"] = opts.traceparent;
     }
     const serializedBody = body !== undefined ? JSON.stringify(body) : undefined;
     return executeResilient(

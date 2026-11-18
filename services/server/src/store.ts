@@ -94,6 +94,7 @@ export interface Job {
   token: string;
   fencingToken: number;
   failures: number;
+  traceparent?: string | null;
 }
 export interface Outcome {
   status: Status;
@@ -105,6 +106,8 @@ export interface Store extends Partial<IdempotencyRecordStore> {
     clientId: string,
     key: string,
     input: AllocationInput,
+    bank?: BankDetails,
+    traceparent?: string | null,
   ): Promise<Allocation>;
   list(clientId: string, employee?: string): Promise<Allocation[]>;
   get(id: string): Promise<Allocation | undefined>;
@@ -154,6 +157,7 @@ export function map(row: any): Allocation {
     status: row.Status,
     reason: row.Reason,
     postingId: row.PostingId,
+    ...(row.Traceparent ? { traceparent: row.Traceparent } : {}),
     createdAt: row.CreatedAt.toISOString(),
     updatedAt: row.UpdatedAt.toISOString(),
   };
@@ -167,6 +171,7 @@ export class SqlStore implements Store {
     key: string,
     input: AllocationInput,
     bank?: BankDetails,
+    traceparent?: string | null,
   ) {
     const fingerprint = payloadFingerprint(input);
     const tx = new sql.Transaction(this.pool);
@@ -183,12 +188,13 @@ export class SqlStore implements Store {
         .input("amount", sql.BigInt, input.amountMinor)
         .input("branch", sql.Char(6), bank?.branch ?? null)
         .input("bankAccount", sql.Char(11), bank?.account ?? null)
-        .input("holder", sql.VarChar(14), bank?.holder ?? null).query(`
+        .input("holder", sql.VarChar(14), bank?.holder ?? null)
+        .input("traceparent", sql.VarChar(128), traceparent ?? null).query(`
           SET XACT_ABORT ON;
-          INSERT dbo.Allocations (Id,ClientId,IdempotencyKey,Fingerprint,SourceAccount,TargetAccount,AmountMinor,Currency,Status)
-          VALUES (@id,@client,@key,@hash,@source,@target,@amount,'ZAR','QUEUED');
-          INSERT dbo.Outbox (AllocationId,Status,NextAttemptAtUtc,FencingToken) VALUES (@id,'PENDING',SYSUTCDATETIME(),0);
-          INSERT dbo.AllocationEvents (AllocationId,Status) VALUES (@id,'QUEUED');
+          INSERT dbo.Allocations (Id,ClientId,IdempotencyKey,Fingerprint,SourceAccount,TargetAccount,AmountMinor,Currency,Status,Traceparent)
+          VALUES (@id,@client,@key,@hash,@source,@target,@amount,'ZAR','QUEUED',@traceparent);
+          INSERT dbo.Outbox (AllocationId,Status,NextAttemptAtUtc,FencingToken,Traceparent) VALUES (@id,'PENDING',SYSUTCDATETIME(),0,@traceparent);
+          INSERT dbo.AllocationEvents (AllocationId,Status,Traceparent) VALUES (@id,'QUEUED',@traceparent);
           IF @branch IS NOT NULL
             INSERT dbo.PayoutInstructions (Id,ClientId,EmployeeAccount,AmountMinor,Branch,BankAccount,Holder)
             VALUES (@id,@client,@source,@amount,@branch,@bankAccount,@holder);`);
@@ -333,7 +339,7 @@ export class SqlStore implements Store {
           LeaseUntil = DATEADD(SECOND, @leaseSeconds, SYSUTCDATETIME()),
           LeaseToken = @leaseToken,
           FencingToken = FencingToken + 1
-      OUTPUT inserted.AllocationId, inserted.FencingToken, inserted.LeaseToken, inserted.Failures;`);
+      OUTPUT inserted.AllocationId, inserted.FencingToken, inserted.LeaseToken, inserted.Failures, inserted.Traceparent;`);
     const row = result.recordset[0];
     return row
       ? {
@@ -341,6 +347,7 @@ export class SqlStore implements Store {
           token: row.LeaseToken,
           fencingToken: Number(row.FencingToken),
           failures: row.Failures,
+          traceparent: row.Traceparent ?? null,
         }
       : undefined;
   }
@@ -355,7 +362,8 @@ export class SqlStore implements Store {
       .input("status", sql.VarChar(24), outcome.status)
       .input("reason", sql.VarChar(80), outcome.reason)
       .input("posting", sql.Char(36), outcome.postingId)
-      .input("terminal", sql.Bit, terminal).query(`
+      .input("terminal", sql.Bit, terminal)
+      .input("traceparent", sql.VarChar(128), job.traceparent ?? null).query(`
         SET XACT_ABORT ON; BEGIN TRAN;
         UPDATE dbo.Outbox
           SET Status = CASE WHEN @terminal = 1 THEN (CASE WHEN @status = 'NEEDS_REVIEW' THEN 'DEAD_LETTER' ELSE 'COMPLETED' END) ELSE 'PENDING' END,
@@ -370,8 +378,8 @@ export class SqlStore implements Store {
         IF @@ROWCOUNT = 1 BEGIN
           IF EXISTS(SELECT 1 FROM dbo.Allocations WHERE Id = @id AND Status IN ('POSTED', 'DECLINED'))
             UPDATE dbo.Outbox SET Status = 'COMPLETED', NextAttemptAtUtc = NULL, DueAt = NULL WHERE AllocationId = @id;
-          INSERT dbo.AllocationEvents (AllocationId, Status, Reason)
-            SELECT Id, @status, @reason FROM dbo.Allocations WHERE Id = @id AND Status <> @status AND Status NOT IN ('POSTED', 'DECLINED');
+          INSERT dbo.AllocationEvents (AllocationId, Status, Reason, Traceparent)
+            SELECT Id, @status, @reason, COALESCE(@traceparent, Traceparent) FROM dbo.Allocations WHERE Id = @id AND Status <> @status AND Status NOT IN ('POSTED', 'DECLINED');
           UPDATE dbo.Allocations SET Status = @status, Reason = @reason, PostingId = @posting, UpdatedAt = SYSUTCDATETIME()
             WHERE Id = @id AND Status NOT IN ('POSTED', 'DECLINED');
         END; COMMIT;`);
@@ -386,7 +394,8 @@ export class SqlStore implements Store {
       .input("failures", sql.Int, failures)
       .input("delay", sql.Int, Math.min(60, 2 ** failures))
       .input("status", sql.VarChar(24), status)
-      .input("reason", sql.VarChar(80), reason.slice(0, 80)).query(`
+      .input("reason", sql.VarChar(80), reason.slice(0, 80))
+      .input("traceparent", sql.VarChar(128), job.traceparent ?? null).query(`
         SET XACT_ABORT ON; BEGIN TRAN;
         UPDATE dbo.Outbox
           SET Failures = @failures,
@@ -401,8 +410,8 @@ export class SqlStore implements Store {
         IF @@ROWCOUNT = 1 BEGIN
           IF EXISTS(SELECT 1 FROM dbo.Allocations WHERE Id = @id AND Status IN ('POSTED', 'DECLINED'))
             UPDATE dbo.Outbox SET Status = 'COMPLETED', NextAttemptAtUtc = NULL, DueAt = NULL WHERE AllocationId = @id;
-          INSERT dbo.AllocationEvents (AllocationId, Status, Reason)
-            SELECT Id, @status, @reason FROM dbo.Allocations WHERE Id = @id AND Status <> @status AND Status NOT IN ('POSTED', 'DECLINED');
+          INSERT dbo.AllocationEvents (AllocationId, Status, Reason, Traceparent)
+            SELECT Id, @status, @reason, COALESCE(@traceparent, Traceparent) FROM dbo.Allocations WHERE Id = @id AND Status <> @status AND Status NOT IN ('POSTED', 'DECLINED');
           UPDATE dbo.Allocations SET Status = @status, Reason = @reason, UpdatedAt = SYSUTCDATETIME()
             WHERE Id = @id AND Status NOT IN ('POSTED', 'DECLINED');
         END; COMMIT;`);
@@ -412,7 +421,8 @@ export class SqlStore implements Store {
       .request()
       .input("id", sql.Char(36), job.id)
       .input("fencingToken", sql.BigInt, job.fencingToken)
-      .input("reason", sql.VarChar(80), reason.slice(0, 80)).query(`
+      .input("reason", sql.VarChar(80), reason.slice(0, 80))
+      .input("traceparent", sql.VarChar(128), job.traceparent ?? null).query(`
         SET XACT_ABORT ON; BEGIN TRAN;
         UPDATE dbo.Outbox
           SET LastError = @reason,
@@ -426,8 +436,8 @@ export class SqlStore implements Store {
         IF @@ROWCOUNT = 1 BEGIN
           IF EXISTS(SELECT 1 FROM dbo.Allocations WHERE Id = @id AND Status IN ('POSTED', 'DECLINED'))
             UPDATE dbo.Outbox SET Status = 'COMPLETED' WHERE AllocationId = @id;
-          INSERT dbo.AllocationEvents (AllocationId, Status, Reason)
-            SELECT Id, 'NEEDS_REVIEW', @reason FROM dbo.Allocations WHERE Id = @id AND Status <> 'NEEDS_REVIEW' AND Status NOT IN ('POSTED', 'DECLINED');
+          INSERT dbo.AllocationEvents (AllocationId, Status, Reason, Traceparent)
+            SELECT Id, 'NEEDS_REVIEW', @reason, COALESCE(@traceparent, Traceparent) FROM dbo.Allocations WHERE Id = @id AND Status <> 'NEEDS_REVIEW' AND Status NOT IN ('POSTED', 'DECLINED');
           UPDATE dbo.Allocations SET Status = 'NEEDS_REVIEW', Reason = @reason, UpdatedAt = SYSUTCDATETIME()
             WHERE Id = @id AND Status NOT IN ('POSTED', 'DECLINED');
         END; COMMIT;`);
@@ -595,6 +605,7 @@ export interface MemoryOutboxRow {
   fencingToken: number;
   failures: number;
   lastError: string | null;
+  traceparent: string | null;
 }
 
 export class MemoryIdempotencyStore implements IdempotencyRecordStore {
@@ -764,6 +775,8 @@ export class MemoryStore implements Store, IdempotencyRecordStore {
     clientId: string,
     key: string,
     input: AllocationInput,
+    _bank?: BankDetails,
+    traceparent?: string | null,
   ): Promise<Allocation> {
     const fp = payloadFingerprint(input);
     const composite = `${clientId}:${key}`;
@@ -784,6 +797,7 @@ export class MemoryStore implements Store, IdempotencyRecordStore {
       status: "QUEUED",
       reason: null,
       postingId: null,
+      ...(traceparent ? { traceparent } : {}),
       createdAt: ts,
       updatedAt: ts,
     };
@@ -798,6 +812,7 @@ export class MemoryStore implements Store, IdempotencyRecordStore {
       fencingToken: 0,
       failures: 0,
       lastError: null,
+      traceparent: traceparent ?? null,
     });
     this.eventLog.set(id, [{ status: "QUEUED", reason: null, createdAt: ts }]);
     return { ...allocation };
@@ -855,6 +870,7 @@ export class MemoryStore implements Store, IdempotencyRecordStore {
       token: leaseToken,
       fencingToken: row.fencingToken,
       failures: row.failures,
+      traceparent: row.traceparent,
     };
   }
 

@@ -48,6 +48,7 @@ export interface PayoutStore {
     clientId: string,
     key: string,
     input: AllocationInput,
+    traceparent?: string | null,
   ): Promise<Payout>;
   listPayouts(clientId: string, employee?: string): Promise<Payout[]>;
   // Claims every debited, unfiled instruction for one new file. Replaying the

@@ -28,9 +28,15 @@ import {
   type PayoutStore,
 } from "./payouts.ts";
 import { EftError } from "./eft.ts";
+import {
+  createChildTraceparent,
+  extractOrCreateTraceparent,
+} from "./trace.ts";
 declare module "fastify" {
   interface FastifyRequest {
     principal?: Principal;
+    traceparent: string;
+    traceId: string;
   }
 }
 export function makeApp(
@@ -64,9 +70,18 @@ export function makeApp(
   app.register(cors, {
     origin: options.origins ?? ["http://localhost:8081"],
     credentials: false,
+    exposedHeaders: ["traceparent", "Idempotency-Replayed"],
   });
   app.register(rateLimit, { max: 120, timeWindow: "1 minute" });
   app.addHook("onRequest", async (request, reply) => {
+    const trace = extractOrCreateTraceparent(request.headers["traceparent"]);
+    request.traceparent = trace.raw;
+    request.traceId = trace.traceId;
+    request.log = request.log.child({
+      traceId: trace.traceId,
+      traceparent: trace.raw,
+    });
+    reply.header("traceparent", trace.raw);
     if (
       request.method === "OPTIONS" ||
       ["/health", "/session"].includes(request.url.split("?")[0])
@@ -192,7 +207,13 @@ export function makeApp(
         .send(acquired.body);
     }
     try {
-      const allocation = await store.create(p.clientId, key, input);
+      const allocation = await store.create(
+        p.clientId,
+        key,
+        input,
+        undefined,
+        request.traceparent,
+      );
       await idempotencyStore.completeIdempotency(
         p.clientId,
         key,
@@ -241,7 +262,9 @@ export function makeApp(
         : undefined;
       if (!a || a.clientId !== p.clientId)
         return reply.code(404).send({ error: "Allocation not found" });
-      const result = await legacy.inquire(a.id);
+      const result = await legacy.inquire(a.id, {
+        traceparent: createChildTraceparent(request.traceparent).raw,
+      });
       if (!result)
         return reply
           .code(409)
@@ -267,7 +290,9 @@ export function makeApp(
           .send({ error: "Allocation already has a final outcome" });
       // A missing intake can be delivered using its original reference. A known
       // intake must be checked against the core before it re-enters a batch.
-      if (await legacy.lookup(a.id)) await legacy.retryUnposted(a.id);
+      const childTrace = createChildTraceparent(request.traceparent).raw;
+      if (await legacy.lookup(a.id, { traceparent: childTrace }))
+        await legacy.retryUnposted(a.id, { traceparent: childTrace });
       await store.wake(a.id);
       return { status: "RESUMED_WITH_ORIGINAL_REFERENCE" };
     },
@@ -317,7 +342,9 @@ function registerPayouts(
     try {
       return reply
         .code(202)
-        .send(await store.createPayout(p.clientId, key, input));
+        .send(
+          await store.createPayout(p.clientId, key, input, request.traceparent),
+        );
     } catch (error) {
       const [code, message] = fail(error);
       return reply.code(code).send({ error: message });

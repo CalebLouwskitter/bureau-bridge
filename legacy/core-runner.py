@@ -111,12 +111,17 @@ def build(root, mode, source=None, fault=None):
     result["generation"] = generation.name
     observed_at = datetime.now(timezone.utc).isoformat()
     sequence = 0 if mode == "SEED" else json.loads((root / "current/manifest.json").read_text()).get("sequence",0)+1
-    (generation / "manifest.json").write_text(json.dumps({"mode": mode,
+    trace_ids = [t.strip() for t in os.environ.get("BUREAU_TRACE_IDS", "").split(",") if t.strip()]
+    manifest_data = {"mode": mode,
         "formatVersion": FORMAT_VERSION,
         "observedAt": observed_at,
         "sequence": sequence,
         "inputSha256": hashlib.sha256((generation / "input.dat").read_bytes()).hexdigest()
-            if mode not in ("SEED","UPGRADE") else None, "result": result}, indent=2))
+            if mode not in ("SEED","UPGRADE") else None,
+        "result": result}
+    if trace_ids:
+        manifest_data["traceIds"] = trace_ids
+    (generation / "manifest.json").write_text(json.dumps(manifest_data, indent=2))
     for path in generation.iterdir():
         with path.open("rb") as handle:
             os.fsync(handle.fileno())

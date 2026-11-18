@@ -81,11 +81,22 @@ const withoutContent = ({
 }: StoredPayoutFile): PayoutFile => file;
 
 export class SqlPayoutStore extends SqlStore implements PayoutStore {
-  async createPayout(clientId: string, key: string, input: AllocationInput) {
+  async createPayout(
+    clientId: string,
+    key: string,
+    input: AllocationInput,
+    traceparent?: string | null,
+  ) {
     const bank = BANK_DETAILS[input.sourceAccount];
     if (!bank || input.targetAccount !== SETTLEMENT_ACCOUNT)
       throw new Conflict("Payouts need a registered bank account");
-    const allocation = await this.create(clientId, key, input, bank);
+    const allocation = await this.create(
+      clientId,
+      key,
+      input,
+      bank,
+      traceparent,
+    );
     const payout = await this.payout(allocation.id);
     // The key already belongs to an allocation with this payload.
     if (!payout)

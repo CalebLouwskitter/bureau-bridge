@@ -46,6 +46,7 @@ export interface Allocation extends AllocationInput {
   status: Status;
   reason: string | null;
   postingId: string | null;
+  traceparent?: string | null;
   createdAt: string;
   updatedAt: string;
 }

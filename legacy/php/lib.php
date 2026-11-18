@@ -83,21 +83,48 @@ function assert_valid_legacy_transition(string $from, string $to): void {
     }
 }
 
+function parse_traceparent(?string $raw): ?string {
+    if ($raw === null) return null;
+    $trimmed = strtolower(trim($raw));
+    if (!preg_match('/^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/D', $trimmed, $m)) {
+        return null;
+    }
+    if ($m[1] === 'ff' || $m[2] === str_repeat('0', 32) || $m[3] === str_repeat('0', 16)) {
+        return null;
+    }
+    return $trimmed;
+}
+
+function generate_traceparent(): string {
+    return '00-' . bin2hex(random_bytes(16)) . '-' . bin2hex(random_bytes(8)) . '-01';
+}
+
+function ensure_traceparent(?string $raw): string {
+    return parse_traceparent($raw) ?? generate_traceparent();
+}
+
+function trace_id_from_traceparent(?string $traceparent): ?string {
+    $valid = parse_traceparent($traceparent);
+    if ($valid === null) return null;
+    return substr($valid, 3, 32);
+}
+
 /**
  * @param array<string, mixed> $data
  * @return array<string, mixed>
  */
-function intake(array $data, ?int $fencingToken = null): array {
+function intake(array $data, ?int $fencingToken = null, ?string $traceparent = null): array {
     $row = allocation($data);
     $hash = hash('sha256', json_encode($row, JSON_THROW_ON_ERROR));
     $initialToken = $fencingToken ?? 0;
+    $validTrace = parse_traceparent($traceparent);
     try {
         $stmt = db()->prepare(
-            'INSERT INTO requests (reference,source_account,target_account,amount_minor,currency,fingerprint,fencing_token) VALUES (?,?,?,?,?,?,?)'
+            'INSERT INTO requests (reference,source_account,target_account,amount_minor,currency,fingerprint,fencing_token,traceparent) VALUES (?,?,?,?,?,?,?,?)'
         );
         $stmt->execute([
             $row['reference'],$row['sourceAccount'],$row['targetAccount'],
-            $row['amountMinor'],$row['currency'],$hash,$initialToken
+            $row['amountMinor'],$row['currency'],$hash,$initialToken,$validTrace
         ]);
     } catch (PDOException $e) {
         if (($e->errorInfo[1] ?? 0) !== 1062) throw $e;
@@ -112,8 +139,11 @@ function intake(array $data, ?int $fencingToken = null): array {
             $recordedToken = (int)($existing['fencing_token'] ?? 0);
             assert_fencing_token($fencingToken, $recordedToken);
             if ($fencingToken !== null && $fencingToken > $recordedToken) {
-                $upd = db()->prepare('UPDATE requests SET fencing_token=? WHERE reference=? AND fencing_token < ?');
-                $upd->execute([$fencingToken, $row['reference'], $fencingToken]);
+                $upd = db()->prepare('UPDATE requests SET fencing_token=?, traceparent=COALESCE(?, traceparent) WHERE reference=? AND fencing_token < ?');
+                $upd->execute([$fencingToken, $validTrace, $row['reference'], $fencingToken]);
+            } elseif ($validTrace !== null && empty($existing['traceparent'])) {
+                $upd = db()->prepare('UPDATE requests SET traceparent=? WHERE reference=? AND traceparent IS NULL');
+                $upd->execute([$validTrace, $row['reference']]);
             }
             db()->commit();
         } catch (Throwable $inner) {
@@ -144,6 +174,7 @@ function public_row(array $row): array {
         'currency'=>$row['currency'],'status'=>$row['status'],'reason'=>$row['reason'],
         'postingId'=>$row['posting_id'],'batchId'=>$row['batch_id'],
         'fencingToken'=>isset($row['fencing_token']) ? (int)$row['fencing_token'] : 0,
+        'traceparent'=>$row['traceparent'] ?? null,
         'createdAt'=>str_replace(' ','T',$row['created_at']).'Z',
         'updatedAt'=>str_replace(' ','T',$row['updated_at']).'Z'];
 }
@@ -164,13 +195,18 @@ function durable_write(string $path, string $contents): void {
     if (!rename($temp,$path)) throw new RuntimeException('Cannot publish batch file');
 }
 /**
+ * @param list<string> $traceIds
  * @return array<string, mixed>
  */
-function core_run(string $mode, ?string $input = null): array {
+function core_run(string $mode, ?string $input = null, array $traceIds = []): array {
     $command = ['python3',config('CORE_RUNNER','/app/core-runner.py'),$mode];
     if ($input !== null) $command[] = $input;
+    $env = null;
+    if ($traceIds !== []) {
+        $env = array_merge(getenv(), ['BUREAU_TRACE_IDS' => implode(',', $traceIds)]);
+    }
     $process = proc_open($command,
-        [0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes);
+        [0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,null,$env);
     if (!is_resource($process)) throw new RuntimeException('Cannot start core runner');
     fclose($pipes[0]);
     $output = stream_get_contents($pipes[1]);
@@ -269,14 +305,20 @@ function batch(bool $dropResult = false): array {
         if ($query === false) throw new RuntimeException('Cannot query received requests');
         $rows = $query->fetchAll(PDO::FETCH_ASSOC);
         if (!$rows) { db()->commit(); return ['records'=>0]; }
-        $id = uuid(); $data = ''; $total = 0;
-        foreach ($rows as $row) { $data .= record_line($row); $total += (int)$row['amount_minor']; }
+        $id = uuid(); $data = ''; $total = 0; $traceIds = [];
+        foreach ($rows as $row) {
+            $data .= record_line($row);
+            $total += (int)$row['amount_minor'];
+            $tid = trace_id_from_traceparent(is_string($row['traceparent'] ?? null) ? $row['traceparent'] : null);
+            if ($tid !== null && !in_array($tid, $traceIds, true)) $traceIds[] = $tid;
+        }
         $checksum = hash('sha256',$data);
         durable_write($dir.'/'.$id.'.dat',$data);
         durable_write($dir.'/'.$id.'.json',json_encode(['id'=>$id,'recordCount'=>count($rows),
-            'amountTotal'=>$total,'sha256'=>$checksum],JSON_THROW_ON_ERROR));
-        $stmt = db()->prepare("INSERT INTO batch_runs (id,record_count,amount_total,checksum,status) VALUES (?,?,?,?,'PROCESSING')");
-        $stmt->execute([$id,count($rows),$total,$checksum]);
+            'amountTotal'=>$total,'sha256'=>$checksum,'traceIds'=>$traceIds],JSON_THROW_ON_ERROR));
+        $traceJson = $traceIds !== [] ? json_encode($traceIds, JSON_THROW_ON_ERROR) : null;
+        $stmt = db()->prepare("INSERT INTO batch_runs (id,record_count,amount_total,checksum,status,trace_ids) VALUES (?,?,?,?,'PROCESSING',?)");
+        $stmt->execute([$id,count($rows),$total,$checksum,$traceJson]);
         $update = db()->prepare("UPDATE requests SET status='BATCHED',batch_id=? WHERE reference=?");
         $item = db()->prepare('INSERT INTO batch_items (batch_id,reference,amount_minor) VALUES (?,?,?)');
         foreach ($rows as $row) {
@@ -288,7 +330,7 @@ function batch(bool $dropResult = false): array {
             $fileHash = hash_file('sha256',$dir.'/'.$id.'.dat');
             if ($fileHash === false || !hash_equals($checksum,$fileHash))
                 throw new RuntimeException('Batch checksum changed before core delivery');
-            $result = core_run('POST',$dir.'/'.$id.'.dat');
+            $result = core_run('POST',$dir.'/'.$id.'.dat',$traceIds);
             if ($dropResult) throw new RuntimeException('Injected missing result after core commit');
             durable_write($dir.'/'.$id.'.result.json',json_encode($result,JSON_THROW_ON_ERROR));
             import_result($result);

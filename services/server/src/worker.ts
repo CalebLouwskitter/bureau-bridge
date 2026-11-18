@@ -7,6 +7,12 @@ import {
   LegacyHttpError,
   LegacyInvariantError,
 } from "./resilience.ts";
+import {
+  createChildTraceparent,
+  extractOrCreateTraceparent,
+} from "./trace.ts";
+
+export type WorkerLogger = (entry: Record<string, unknown>) => void;
 
 const mapping: Record<string, Status> = {
   RECEIVED: "AWAITING_BATCH",
@@ -31,20 +37,33 @@ function classifyReason(error: unknown): string {
   return "DELIVERY_OR_VERIFICATION_FAILED";
 }
 
-export async function tick(store: Store, legacy: Legacy): Promise<boolean> {
+export async function tick(
+  store: Store,
+  legacy: Legacy,
+  log?: WorkerLogger,
+): Promise<boolean> {
   const job = await store.claim();
   if (!job) return false;
+  let trace = extractOrCreateTraceparent(job.traceparent);
   try {
     const allocation = await store.get(job.id);
     if (!allocation) throw new LegacyInvariantError("MISSING_ALLOCATION");
+    if (!job.traceparent && allocation.traceparent) {
+      trace = extractOrCreateTraceparent(allocation.traceparent);
+    }
+    const tracedJob = { ...job, traceparent: trace.raw };
     if (["POSTED", "DECLINED"].includes(allocation.status)) {
-      await store.finish(job, allocation);
+      await store.finish(tracedJob, allocation);
       return true;
     }
     // Always inspect the stable reference before submitting. A retry preserves it.
-    const callOpts = { fencingToken: job.fencingToken };
+    const child = createChildTraceparent(trace);
+    const callOpts = {
+      fencingToken: tracedJob.fencingToken,
+      traceparent: child.raw,
+    };
     const result =
-      (await legacy.lookup(job.id, callOpts)) ??
+      (await legacy.lookup(tracedJob.id, callOpts)) ??
       (await legacy.submit(allocation, callOpts));
     if (
       result.reference !== allocation.id ||
@@ -61,21 +80,51 @@ export async function tick(store: Store, legacy: Legacy): Promise<boolean> {
       (status === "DECLINED" && result.postingId !== null)
     )
       throw new LegacyInvariantError("INVALID_LEGACY_STATUS");
-    await store.finish(job, {
+    await store.finish(tracedJob, {
       status,
       reason: result.reason,
       postingId: result.postingId,
     });
+    log?.({
+      level: "info",
+      component: "worker",
+      event: "allocation_transitioned",
+      allocationId: tracedJob.id,
+      fencingToken: tracedJob.fencingToken,
+      status,
+      traceId: trace.traceId,
+      traceparent: child.raw,
+    });
   } catch (error) {
     if (error instanceof LegacyHttpError && error.code === "STALE_FENCING_TOKEN") {
+      log?.({
+        level: "warn",
+        component: "worker",
+        event: "stale_fencing_token_rejected",
+        allocationId: job.id,
+        fencingToken: job.fencingToken,
+        traceId: trace.traceId,
+        traceparent: trace.raw,
+      });
       return true;
     }
     const reason = classifyReason(error);
+    const tracedJob = { ...job, traceparent: trace.raw };
     if (!isTransientError(error)) {
+      log?.({
+        level: "error",
+        component: "worker",
+        event: "allocation_dead_lettered",
+        allocationId: job.id,
+        fencingToken: job.fencingToken,
+        reason,
+        traceId: trace.traceId,
+        traceparent: trace.raw,
+      });
       if (store.deadLetter) {
-        await store.deadLetter(job, reason);
+        await store.deadLetter(tracedJob, reason);
       } else {
-        await store.finish(job, {
+        await store.finish(tracedJob, {
           status: "NEEDS_REVIEW",
           reason,
           postingId: null,
@@ -83,7 +132,17 @@ export async function tick(store: Store, legacy: Legacy): Promise<boolean> {
       }
       return true;
     }
-    await store.retry(job, reason);
+    log?.({
+      level: "warn",
+      component: "worker",
+      event: "allocation_retry_scheduled",
+      allocationId: job.id,
+      fencingToken: job.fencingToken,
+      reason,
+      traceId: trace.traceId,
+      traceparent: trace.raw,
+    });
+    await store.retry(tracedJob, reason);
   }
   return true;
 }

@@ -4,6 +4,9 @@ import { env } from "./config.ts";
 import { LegacyClient } from "./legacy.ts";
 import { tick } from "./worker.ts";
 import { reconcile } from "./reconciliation.ts";
+import { generateTraceparent } from "./trace.ts";
+const logWorker = (entry: Record<string, unknown>) =>
+  console.log(JSON.stringify({ timestamp: new Date().toISOString(), ...entry }));
 const pool = await connection().connect();
 const store = new SqlPayoutStore(pool),
   legacy = new LegacyClient(
@@ -31,13 +34,17 @@ while (running) {
   try {
     if (Date.now() >= nextAccounts) {
       nextAccounts = Date.now() + accountEvery;
-      await store.syncAccounts("INSURER_DEMO", await legacy.accounts());
+      const trace = generateTraceparent();
+      await store.syncAccounts(
+        "INSURER_DEMO",
+        await legacy.accounts({ traceparent: trace.raw }),
+      );
     }
     if (Date.now() >= nextReconciliation) {
       nextReconciliation = Date.now() + reconcileEvery;
       await reconcile(store, legacy, "INSURER_DEMO", store);
     }
-    if (await tick(store, legacy)) continue;
+    if (await tick(store, legacy, logWorker)) continue;
   } catch (error) {
     console.error(
       JSON.stringify({

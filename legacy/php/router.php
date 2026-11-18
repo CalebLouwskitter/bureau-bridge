@@ -8,6 +8,10 @@ function respond(mixed $data, int $status=200): never {
 function bearer(string $name): void {
     if (!hash_equals('Bearer '.config($name),$_SERVER['HTTP_AUTHORIZATION'] ?? '')) respond(['error'=>'Unauthorized'],401);
 }
+$rawTrace = $_SERVER['HTTP_TRACEPARENT'] ?? null;
+$traceparent = ensure_traceparent(is_string($rawTrace) ? $rawTrace : null);
+$traceId = trace_id_from_traceparent($traceparent);
+header('traceparent: ' . $traceparent);
 try {
     $path = parse_url($_SERVER['REQUEST_URI'] ?? '',PHP_URL_PATH);
     $path = is_string($path) ? $path : '';
@@ -31,7 +35,7 @@ try {
             if (!is_array($data)) respond(['error'=>'Expected object'],400);
             $rawToken = $_SERVER['HTTP_X_FENCING_TOKEN'] ?? null;
             $fencingToken = parse_fencing_token(is_string($rawToken) ? $rawToken : null);
-            respond(intake($data, $fencingToken),202);
+            respond(intake($data, $fencingToken, $traceparent),202);
         }
         if (preg_match('#^/v1/requests/([0-9a-f-]{36})$#D',$path,$matches) && $method==='GET') {
             $row=lookup($matches[1]);
@@ -86,4 +90,13 @@ try {
 catch (StaleFencingTokenException $e) { respond(['error'=>$e->getMessage(),'code'=>'STALE_FENCING_TOKEN'],409); }
 catch (DomainException $e) { respond(['error'=>$e->getMessage()],409); }
 catch (OutOfBoundsException $e) { respond(['error'=>$e->getMessage()],404); }
-catch (Throwable $e) { error_log($e->getMessage()); respond(['error'=>'Legacy operation needs investigation'],503); }
+catch (Throwable $e) {
+    error_log(json_encode([
+        'level' => 'error',
+        'component' => 'legacy-php',
+        'traceId' => $traceId,
+        'traceparent' => $traceparent,
+        'message' => $e->getMessage(),
+    ]) ?: $e->getMessage());
+    respond(['error'=>'Legacy operation needs investigation'],503);
+}

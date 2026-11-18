@@ -1,0 +1,5 @@
+ALTER TABLE requests
+  ADD COLUMN IF NOT EXISTS traceparent VARCHAR(128) NULL;
+
+ALTER TABLE batch_runs
+  ADD COLUMN IF NOT EXISTS trace_ids TEXT NULL;
